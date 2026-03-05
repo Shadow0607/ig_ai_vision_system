@@ -1,0 +1,52 @@
+/* src/views/NotFound/style.css */
+.not-found-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 70vh;
+    text-align: center;
+    color: #fff;
+}
+
+.error-code {
+    font-size: 8rem;
+    font-weight: bold;
+    background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    line-height: 1;
+    margin-bottom: 10px;
+}
+
+.glitch-text {
+    font-size: 1.5rem;
+    letter-spacing: 4px;
+    color: #ff4d4f;
+    margin-bottom: 20px;
+    text-transform: uppercase;
+}
+
+.description {
+    color: #8a8d91;
+    max-width: 400px;
+    margin-bottom: 30px;
+    line-height: 1.6;
+}
+
+.btn-back {
+    padding: 12px 30px;
+    background: rgba(79, 172, 254, 0.1);
+    border: 1px solid #4facfe;
+    color: #4facfe;
+    text-decoration: none;
+    border-radius: 8px;
+    font-weight: bold;
+    transition: all 0.3s ease;
+}
+
+.btn-back:hover {
+    background: #4facfe;
+    color: #fff;
+    box-shadow: 0 0 20px rgba(79, 172, 254, 0.4);
+}

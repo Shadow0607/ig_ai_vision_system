@@ -1,0 +1,244 @@
+/* =========================================
+   System Monitor Dashboard 專用樣式
+   ========================================= */
+
+/* 佈局容器調整 */
+.dashboard-layout {
+  gap: 30px;
+  background: #121212; /* 深色背景 */
+}
+
+/* 頂部標題與狀態燈 */
+.dashboard-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 20px;
+  border-bottom: 1px solid #333;
+}
+
+.live-indicator {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(76, 175, 80, 0.1);
+  padding: 6px 12px;
+  border-radius: 20px;
+  border: 1px solid rgba(76, 175, 80, 0.3);
+}
+
+.pulse-dot {
+  width: 10px;
+  height: 10px;
+  background-color: #4caf50;
+  border-radius: 50%;
+  box-shadow: 0 0 10px #4caf50;
+  animation: pulse 2s infinite;
+}
+
+.status-text {
+  color: #4caf50;
+  font-size: 0.8rem;
+  font-weight: bold;
+  letter-spacing: 1px;
+}
+
+.last-update {
+  color: #666;
+  font-size: 0.9rem;
+  font-family: monospace;
+}
+
+@keyframes pulse {
+  0% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(1.2); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+/* --- 數據卡片網格 --- */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 25px;
+}
+
+.stat-card {
+  background: #1e1e1e;
+  border: 1px solid #333;
+  border-radius: 16px;
+  padding: 25px;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  position: relative;
+  overflow: hidden;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.stat-card:hover {
+  transform: translateY(-5px);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+  border-color: #555;
+}
+
+/* 卡片左側 Icon */
+.stat-icon {
+  font-size: 2.5rem;
+  background: rgba(255, 255, 255, 0.05);
+  width: 60px;
+  height: 60px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.stat-content {
+  display: flex;
+  flex-direction: column;
+}
+
+.stat-label {
+  color: #aaa;
+  font-size: 0.9rem;
+  margin-bottom: 5px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.stat-value {
+  color: #fff;
+  font-size: 2.2rem;
+  font-weight: 800;
+  font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  line-height: 1;
+}
+
+.stat-value small { font-size: 1.2rem; color: #888; margin-left: 2px; }
+
+/* 個別卡片配色 */
+.success-card .stat-value { color: #4caf50; text-shadow: 0 0 20px rgba(76, 175, 80, 0.3); }
+.warning-card .stat-value { color: #ff9800; }
+.info-card .stat-value { color: #2196f3; }
+
+/* 進度條裝飾 */
+.progress-bar-bg {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: 4px;
+  background: rgba(33, 150, 243, 0.2);
+}
+.progress-bar-fill {
+  height: 100%;
+  background: #2196f3;
+  box-shadow: 0 0 10px #2196f3;
+  transition: width 1s ease-out;
+}
+
+/* --- 監控終端機 (Console) --- */
+.monitor-console {
+  background: #000;
+  border: 1px solid #333;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+  min-height: 300px;
+}
+
+.console-header {
+  background: #1a1a1a;
+  padding: 12px 20px;
+  border-bottom: 1px solid #333;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.console-title {
+  color: #ddd;
+  font-weight: bold;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.console-title::before {
+  content: ">_";
+  color: #4caf50;
+  font-family: monospace;
+  font-weight: bold;
+}
+
+.console-badge {
+  background: #333;
+  color: #aaa;
+  font-size: 0.8rem;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.console-body {
+  padding: 20px;
+  flex: 1;
+  overflow-y: auto;
+  font-family: 'Consolas', 'Monaco', monospace;
+  background-image: linear-gradient(rgba(0, 20, 0, 0.05) 1px, transparent 1px); /* 掃描線效果 */
+  background-size: 100% 4px;
+}
+
+/* 空狀態 */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #444;
+}
+.empty-state .check-icon { font-size: 3rem; margin-bottom: 10px; opacity: 0.5; }
+
+/* 告警列表 */
+.alert-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.alert-item {
+  padding: 10px;
+  border-bottom: 1px solid #222;
+  display: flex;
+  align-items: flex-start;
+  gap: 15px;
+  font-size: 0.95rem;
+  transition: background 0.2s;
+}
+
+.alert-item:hover { background: rgba(255, 255, 255, 0.05); }
+
+.alert-time { color: #666; white-space: nowrap; min-width: 140px; }
+
+.alert-tag {
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 0.8rem;
+  font-weight: bold;
+  text-transform: uppercase;
+}
+.alert-tag.DB_ERROR { background: #d32f2f; color: #fff; }
+.alert-tag.RATE_LIMIT { background: #f57c00; color: #fff; }
+.alert-tag.SYSTEM { background: #1976d2; color: #fff; }
+
+.alert-msg { color: #ccc; word-break: break-all; }
+
+/* 進場動畫 */
+.animate-slide-in {
+  animation: slideIn 0.3s ease-out forwards;
+}
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(-10px); }
+  to { opacity: 1; transform: translateX(0); }
+}

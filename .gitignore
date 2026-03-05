@@ -1,0 +1,53 @@
+# === 1. 敏感資訊 (不上傳) ===
+.env
+.env.*
+!.env.example
+*.pem
+*.pfx
+*.cert
+
+# === 2. .NET / C# 暫存與編譯檔 ===
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+publish/
+.vs/
+.vscode/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# === 3. Node.js / Vue 3 前端暫存 ===
+node_modules/
+dist/
+dist-ssr/
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.eslintcache
+.stylelintcache
+
+# === 4. 作業系統與 IDE 暫存 ===
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+*.swp
+*.bak
+
+# === 5. 資料庫與儲存空間暫存 ===
+# Docker volumes 對應到本地目錄
+mysql_data/
+minio_data/
+qdrant_data/
+eth_data/
+# === 6. 其他暫存與備份檔 ===
+__pycache__
+*.pyc
+*.pyo
+*.sln
+appsettings.Development.json
+

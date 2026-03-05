@@ -1,0 +1,175 @@
+/* components/Sidebar/style.css */
+/* ❌ 刪除原本代碼中的 style scoped 和 style 標籤 */
+
+:root {
+  /* 🟢 展開寬度，與 App.vue :root 保持一致 */
+  --sidebar-width: 260px;
+  /* 🟢 收合寬度，剛好保留圖示 */
+  --sidebar-collapsed-width: 70px;
+}
+
+.sidebar {
+  /* 🟢 使用變量設置寬度 */
+  width: var(--sidebar-width);
+  /* 🟢 添加寬度過渡動畫 */
+  transition: width 0.3s ease;
+  overflow: hidden; /* 確保收合時內容不溢出 */
+  /* 保留原本佈局樣式 */
+  background-color: var(--bg-dark, #1a1c23);
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid #333;
+  height: 100vh;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+/* 🟢 收合狀態的寬度 */
+.sidebar.collapsed {
+  width: var(--sidebar-collapsed-width);
+}
+
+.brand {
+  padding: 30px 24px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 1.2rem;
+  font-weight: bold;
+  background: linear-gradient(to right, #4facfe 0%, #00f2fe 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  /* 🟢 為 padding 和 gap 添加過渡 */
+  transition: padding 0.3s ease, gap 0.3s ease;
+}
+
+/* 🟢 收合時調整品牌 padding 和 gap */
+.sidebar.collapsed .brand {
+  padding: 30px 0;
+  gap: 0;
+  justify-content: center;
+}
+
+.logo-icon {
+  background: #4facfe;
+  color: white; /* 不需要漸層，保持純白字 */
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  /* 🟢 為 padding 和 font-size 添加過渡 */
+  transition: padding 0.3s ease, font-size 0.3s ease;
+}
+
+/* 🟢 收合時隱藏品牌文字 */
+.brand-text {
+  opacity: 1;
+  transition: opacity 0.3s ease;
+  overflow: hidden; /* 確保文字不溢出 */
+  white-space: nowrap; /* 確保文字不換行 */
+}
+
+.sidebar.collapsed .brand-text {
+  opacity: 0;
+  width: 0; /* 用 width 0 來完全隱藏，不影響佈局 */
+}
+
+/* 🟢 收合時隱藏菜單項目文字 */
+.menu-item-text {
+  opacity: 1;
+  transition: opacity 0.3s ease;
+  overflow: hidden; /* 確保文字不溢出 */
+  white-space: nowrap; /* 確保文字不換行 */
+}
+
+.sidebar.collapsed .menu-item-text {
+  opacity: 0;
+  width: 0; /* 用 width 0 來完全隱藏 */
+}
+
+/* 🟢 收合時隱藏底部版本文字 */
+.version-text {
+  opacity: 1;
+  transition: opacity 0.3s ease;
+  overflow: hidden; /* 確保文字不溢出 */
+  white-space: nowrap; /* 確保文字不換行 */
+}
+
+.sidebar.collapsed .version-text {
+  opacity: 0;
+  width: 0; /* 完全隱藏 */
+}
+
+/* 菜單項目基礎樣式 */
+.menu {
+  flex: 1;
+  padding: 10px;
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  padding: 14px 16px;
+  color: #8a8d91;
+  text-decoration: none;
+  border-radius: 10px;
+  margin-bottom: 8px;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  /* gap: 12px; 用文字的 margin 代替 */
+}
+
+/* 🟢 收合時調整菜單項目的 padding 和 justify-content */
+.sidebar.collapsed .menu-item {
+  padding: 14px 0;
+  justify-content: center;
+}
+
+/* 🟢 文字添加 margin 以代替 gap */
+.menu-item-text {
+  margin-left: 12px;
+}
+
+/* 🟢 收合時移除 margin */
+.sidebar.collapsed .menu-item-text {
+  margin-left: 0;
+}
+
+.menu-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: #fff;
+}
+
+/* Vue Router 自動激活樣式 */
+.router-link-active {
+  background: rgba(79, 172, 254, 0.15);
+  color: #4facfe;
+  box-shadow: inset 4px 0 0 #4facfe;
+}
+
+/* 🟢 收合激活項目的樣式調整 */
+.sidebar.collapsed .router-link-active {
+  box-shadow: none; /* 移除收合時的左側陰影，因為 icon 是居中的 */
+  background: rgba(79, 172, 254, 0.25); /* 稍微加深背景 */
+}
+
+.icon {
+  font-style: normal;
+  font-size: 1.2rem;
+  transition: font-size 0.3s ease;
+}
+
+/* 🟢 收合時圖示可以稍微放大或居中 */
+.sidebar.collapsed .icon {
+  font-size: 1.3rem;
+}
+
+.sidebar-footer {
+  padding: 20px;
+  font-size: 0.75rem;
+  color: #555;
+  text-align: center;
+  display: flex;
+  justify-content: center; /* 確保文字居中 */
+}

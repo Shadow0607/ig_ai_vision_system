@@ -1,0 +1,77 @@
+/* --- 全域變數 --- */
+:root {
+  --bg-dark: #0f1115;
+  --bg-card: rgba(255, 255, 255, 0.03);
+  --primary: #4facfe;
+  --secondary: #00f2fe;
+  --accent: #764ba2;
+  --danger: #ff4d4f;
+  --text: #e0e0e0;
+  --border: rgba(255, 255, 255, 0.1);
+}
+
+/* --- 通用佈局 --- */
+.page-container {
+  padding: 20px;
+  color: var(--text);
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 24px;
+  font-size: 1.5rem;
+}
+
+/* --- 科技感卡片 (所有頁面共用) --- */
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 20px;
+}
+
+.data-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  overflow: hidden;
+  transition: transform 0.3s ease, border-color 0.3s ease;
+}
+
+.data-card:hover {
+  transform: translateY(-5px);
+  border-color: var(--primary);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+/* --- 通用按鈕 --- */
+.btn {
+  border: none;
+  padding: 10px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  transition: filter 0.2s;
+}
+
+.btn-primary { background: linear-gradient(135deg, var(--primary), var(--secondary)); color: white; }
+.btn-accent { background: linear-gradient(135deg, #667eea, var(--accent)); color: white; }
+.btn-outline { background: transparent; border: 1px solid var(--danger); color: var(--danger); }
+
+.btn:hover { filter: brightness(1.2); }
+
+/* src/assets/style.css 必備地基 */
+.page-container { padding: 2rem; max-width: 1400px; margin: 0 auto; }
+.section-title { font-size: 1.8rem; margin-bottom: 2rem; color: #fff; display: flex; align-items: center; gap: 10px; }
+
+/* 網格系統 */
+.card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1.5rem; }
+
+/* 佈局輔助 (修正你 template 裡的 flex/gap) */
+.flex { display: flex; }
+.gap-2 { gap: 0.5rem; }
+.p-4 { padding: 1rem; }
+
+/* 圖片處理 */
+.card-img { width: 100%; height: 200px; object-fit: cover; display: block; }

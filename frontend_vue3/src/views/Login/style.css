@@ -1,0 +1,241 @@
+/* src/views/Login/style.css */
+.login-container {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0f1115;
+  background-image: 
+    radial-gradient(circle at 50% 50%, rgba(79, 172, 254, 0.05) 0%, transparent 50%);
+}
+
+.login-box {
+  width: 100%;
+  max-width: 420px;
+  background: #1a1c23;
+  padding: 40px;
+  border-radius: 16px;
+  border: 1px solid #333;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+}
+
+.login-header {
+  text-align: center;
+  margin-bottom: 30px;
+}
+
+.logo-icon {
+  width: 48px;
+  height: 48px;
+  background: #4facfe;
+  color: #fff;
+  font-weight: bold;
+  font-size: 1.2rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  margin: 0 auto 16px;
+  box-shadow: 0 0 20px rgba(79, 172, 254, 0.4);
+}
+
+h2 {
+  color: #fff;
+  margin: 0;
+  font-size: 1.5rem;
+}
+
+.subtitle {
+  color: #8a8d91;
+  font-size: 0.9rem;
+  margin-top: 8px;
+}
+
+.form-group {
+  margin-bottom: 20px;
+}
+
+label {
+  display: block;
+  color: #8a8d91;
+  font-size: 0.85rem;
+  margin-bottom: 8px;
+}
+
+input {
+  width: 100%;
+  padding: 12px 16px;
+  background: #0f1115;
+  border: 1px solid #333;
+  border-radius: 8px;
+  color: #fff;
+  font-size: 1rem;
+  box-sizing: border-box;
+  transition: border-color 0.3s;
+}
+
+input:focus {
+  outline: none;
+  border-color: #4facfe;
+  background: #14161a;
+}
+
+.btn-login {
+  width: 100%;
+  padding: 14px;
+  background: linear-gradient(to right, #4facfe, #00f2fe);
+  border: none;
+  border-radius: 8px;
+  color: #fff;
+  font-weight: bold;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: opacity 0.3s, transform 0.1s;
+  margin-top: 10px;
+}
+
+.btn-login:hover {
+  opacity: 0.9;
+}
+
+.btn-login:active {
+  transform: scale(0.98);
+}
+
+.btn-login:disabled {
+  background: #333;
+  color: #8a8d91;
+  cursor: not-allowed;
+}
+
+.error-banner {
+  background: rgba(255, 77, 79, 0.1);
+  border: 1px solid rgba(255, 77, 79, 0.3);
+  color: #ff4d4f;
+  padding: 10px;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  text-align: center;
+  margin-bottom: 20px;
+  animation: shake 0.4s ease-in-out;
+}
+
+.login-footer {
+  margin-top: 30px;
+  text-align: center;
+  color: #444;
+  font-size: 0.75rem;
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-5px); }
+  75% { transform: translateX(5px); }
+}
+.captcha-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.captcha-input {
+  flex: 1; /* 輸入框佔滿剩餘空間 */
+  letter-spacing: 2px; /* 讓文字寬鬆一點 */
+  text-transform: uppercase; /* 自動轉大寫 */
+  text-align: center;
+}
+
+.captcha-img {
+  width: 120px;
+  height: 44px; /* 與 input 高度一致 */
+  border-radius: 8px;
+  cursor: pointer;
+  background: #fff; /* 確保畫布底色 */
+  transition: opacity 0.2s;
+}
+
+.captcha-img:hover {
+  opacity: 0.8;
+  box-shadow: 0 0 10px rgba(255, 255, 255, 0.2);
+}
+
+/* 🟢 新增：分隔線 */
+.divider {
+  display: flex;
+  align-items: center;
+  margin: 20px 0;
+  color: #555;
+  font-size: 0.85rem;
+}
+
+.divider::before,
+.divider::after {
+  content: "";
+  flex: 1;
+  border-bottom: 1px solid #333;
+}
+
+.divider span {
+  padding: 0 10px;
+}
+
+/* 🟢 新增：Google 登入按鈕 */
+.btn-google {
+  width: 100%;
+  padding: 12px;
+  background: #ffffff;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  color: #333;
+  font-weight: 500;
+  font-size: 0.95rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  transition: all 0.2s;
+}
+
+.btn-google:hover {
+  background: #f1f1f1;
+}
+
+.btn-google:active {
+  background: #e8e8e8;
+  transform: scale(0.98);
+}
+
+.google-icon {
+  width: 18px;
+  height: 18px;
+}
+/* 🌟 新增：註冊成功的綠色提示框 */
+.success-banner {
+  background: rgba(82, 196, 26, 0.1);
+  border: 1px solid rgba(82, 196, 26, 0.3);
+  color: #52c41a;
+  padding: 10px;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  text-align: center;
+  margin-bottom: 20px;
+}
+
+/* 🌟 新增：模式切換容器與連結 */
+.toggle-mode-container {
+  text-align: center;
+  margin-top: 16px;
+}
+
+.toggle-link {
+  color: #8a8d91;
+  font-size: 0.85rem;
+  text-decoration: none;
+  transition: color 0.2s;
+}
+
+.toggle-link:hover {
+  color: #4facfe;
+  text-decoration: underline;
+}

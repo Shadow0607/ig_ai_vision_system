@@ -1,0 +1,68 @@
+/* src/App.css */
+:root {
+  --sidebar-width: 260px;
+  --bg-dark: #1a1c23;
+  --text-main: #ffffff;
+}
+
+body {
+  margin: 0;
+  background-color: #0f1115;
+  color: var(--text-main);
+  font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+}
+
+.app-shell {
+  display: flex;
+  min-height: 100vh;
+}
+
+/* 主內容區佈局 (Sidebar 樣式已經在組件內了，這裡不用寫) */
+.main-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.top-bar {
+  height: 70px;
+  padding: 0 30px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: rgba(15, 17, 21, 0.8);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid #333;
+}
+
+.page-title { font-size: 1.1rem; font-weight: 500; }
+
+.page-content {
+  padding: 30px;
+  overflow-y: auto;
+  height: calc(100vh - 70px); /* 扣掉 header 高度 */
+}
+
+/* 轉場動畫 */
+.page-fade-enter-active, .page-fade-leave-active {
+  transition: all 0.25s ease;
+}
+.page-fade-enter-from { opacity: 0; transform: translateY(10px); }
+.page-fade-leave-to { opacity: 0; transform: translateY(-10px); }
+.user-info {
+  cursor: pointer;
+  padding: 6px 12px;
+  border-radius: 6px;
+  transition: background 0.2s;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.user-info:hover {
+  background: rgba(79, 172, 254, 0.1);
+  color: #4facfe;
+}
+
+.login-prompt {
+  font-weight: bold;
+  letter-spacing: 0.5px;
+}

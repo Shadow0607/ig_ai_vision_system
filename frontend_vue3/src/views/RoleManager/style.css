@@ -1,0 +1,141 @@
+/* 容器與標題 */
+.role-manager-container {
+  padding: 10px;
+  color: #e0e0e0;
+}
+
+.role-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.role-title {
+  margin: 0;
+  font-size: 1.25rem;
+  color: #fff;
+}
+
+/* 主按鈕 */
+.btn-primary {
+  background-color: #0ea5e9;
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: bold;
+  transition: background 0.2s;
+}
+.btn-primary:hover { background-color: #0284c7; }
+
+/* 表格區塊 */
+.admin-table-wrapper {
+  background: #1e1e1e;
+  border: 1px solid #333;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.admin-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+
+.admin-table th {
+  background-color: #252525;
+  color: #aaa;
+  padding: 14px 16px;
+  text-align: left;
+  font-weight: 500;
+  border-bottom: 1px solid #333;
+}
+
+.admin-table td {
+  padding: 14px 16px;
+  border-bottom: 1px solid #333;
+  color: #eee;
+  vertical-align: middle;
+}
+
+.admin-table tr:last-child td { border-bottom: none; }
+.admin-table tr:hover td { background-color: #2a2a2a; }
+
+/* 標籤樣式 */
+.code-badge {
+  background: #333;
+  color: #fbbf24;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-family: 'Courier New', monospace;
+  font-size: 0.85rem;
+  border: 1px solid #444;
+}
+
+.member-count {
+  background: #1e3a8a;
+  color: #93c5fd;
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-size: 0.85rem;
+  font-weight: bold;
+}
+
+/* 操作按鈕 */
+.action-cell { display: flex; gap: 8px; }
+.action-btn {
+  background: #2a2a2a;
+  border: 1px solid #444;
+  color: #ccc;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: 0.2s ease;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.edit-btn:hover { background: #3b82f6; color: white; border-color: #3b82f6; }
+.delete-btn:hover { background: #ef4444; color: white; border-color: #ef4444; }
+
+/* 彈窗樣式 (確保背景不會透明) */
+.modal-overlay {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.75);
+  display: flex; justify-content: center; align-items: center;
+  z-index: 2000;
+  backdrop-filter: blur(3px);
+}
+
+.modal-content {
+  background: #18181b; /* 深灰背景 */
+  padding: 24px;
+  border-radius: 8px;
+  width: 400px;
+  border: 1px solid #333;
+  box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+}
+
+.modal-content h3 { margin-top: 0; margin-bottom: 20px; color: #fff; }
+
+/* 表單樣式 */
+.form-item { margin-bottom: 16px; }
+.form-item label { display: block; margin-bottom: 8px; color: #aaa; font-size: 0.9rem; }
+.form-item input {
+  width: 100%; padding: 10px;
+  background: #252525; border: 1px solid #444;
+  color: #fff; border-radius: 4px; box-sizing: border-box;
+}
+.form-item input:focus { border-color: #0ea5e9; outline: none; }
+.form-item input:disabled { background: #1a1a1a; color: #666; cursor: not-allowed; }
+.hint-text { color: #666; font-size: 0.8rem; margin-top: 4px; display: block; }
+
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 25px; }
+.modal-actions button { padding: 8px 16px; border-radius: 4px; border: none; cursor: pointer; font-weight: bold; }
+.btn-cancel { background: #333; color: #ccc; }
+.btn-cancel:hover { background: #444; color: #fff; }
+.btn-confirm { background: #10b981; color: white; }
+.btn-confirm:hover { background: #059669; }
