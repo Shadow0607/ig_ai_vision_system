@@ -1,4 +1,4 @@
-import { ref, onMounted, nextTick } from 'vue';
+import { ref, onMounted, nextTick, computed } from 'vue';
 import api from '@/api_clients/api.js';
 
 export default {
@@ -19,13 +19,15 @@ export default {
     const totalPages = ref(1);
     const totalItems = ref(0);
 
+    // script.js
     const tabs = [
       { label: '🌟 本人(Match)', value: 'OUTPUT' },
       { label: '❓ 待覆核(HITL)', value: 'HITL' },
-      { label: '🗑️ 排除(Rejected)', value: 'REJECTED' },
-      { label: '👤 無人臉(NoFace)', value: 'NOFACE' }
+      { label: '🗑️ 排除(Rejected)', value: 'REJECTED' }, // 這裡現在會包含 GARBAGE
+      { label: '👤 無人臉(NoFace)', value: 'NOFACE' },
+      { label: '⏩ 跳過(Skip)', value: 'SKIP' },     // 🌟 新增：看到被 AI 忽略的檔案
+      { label: '♻️ 垃圾桶(Garbage)', value: 'GARBAGE' } // 🌟 新增：看到徹底被過濾的檔案
     ];
-
     const fetchPersons = async () => {
       try {
         const res = await api.getAllPersons();
@@ -98,6 +100,18 @@ export default {
       if (idx > -1) selectedIds.value.splice(idx, 1);
       else selectedIds.value.push(id);
     };
+    const isAllSelected = computed(() => {
+      return mediaList.value.length > 0 && selectedIds.value.length === mediaList.value.length;
+    });
+
+    // 🌟 3. 新增：切換全選 / 取消全選
+    const toggleSelectAll = () => {
+      if (isAllSelected.value) {
+        selectedIds.value = []; // 如果已全選，則清空
+      } else {
+        selectedIds.value = mediaList.value.map(item => item.id); // 否則將本頁所有 ID 加入
+      }
+    };
 
     const reclassify = async (item, newStatus) => {
       const actionName = newStatus === 'OUTPUT' ? '恢復為本人' : '移至排除區';
@@ -134,7 +148,8 @@ export default {
       fullViewImage, openFullView, closeFullView, reclassify,
       selectedIds, toggleSelection, batchReclassify, videoPlayer,
       personsList, selectedAccount, onAccountChange,
-      currentPage, pageSize, totalPages, totalItems, changePage, onPageSizeChange // 👈 匯出分頁方法
+      currentPage, pageSize, totalPages, totalItems, changePage, onPageSizeChange,
+      isAllSelected, toggleSelectAll // 👈 匯出分頁方法
     };
   }
 }

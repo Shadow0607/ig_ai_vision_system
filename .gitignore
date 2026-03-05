@@ -51,3 +51,11 @@ __pycache__
 *.sln
 appsettings.Development.json
 
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.mp4
+*.avi
+*.mov

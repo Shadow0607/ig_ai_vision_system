@@ -56,36 +56,39 @@ class S1Producer:
             sys.exit(1)
 
     def process_media_pipeline(self, post, system_name: str, is_story: bool = False):
-        """[完全保留原始邏輯] 下載並執行影音處理管線 (ffmpeg)"""
-        media_info = self.ig.download_media(post, system_name, is_story)
-        if not media_info: 
-            return None, None, None, None
+        """🌟 修正版：支援多圖管線處理"""
+        media_list = self.ig.download_media(post, system_name, is_story)
+        if not media_list: return []
 
-        filename = media_info["filename"]
-        video_file = media_info["video_file"]
-        image_file = media_info["image_file"]
-        media_type = "VIDEO" if media_info["is_video"] else "IMAGE"
-        
-        db_file_path = image_file
-        ai_file_path = image_file
-        db_filename = f"{filename}.jpg"
-
-        # 🛑 核心邏輯保留：如果是影片，執行合併與靜態判定
-        if media_type == "VIDEO" and os.path.exists(video_file):
-            MediaProcessor.merge_thumbnail_to_video(video_file, image_file)
+        valid_media = []
+        for media_info in media_list:
+            filename = media_info["filename"]
+            video_file = media_info["video_file"]
+            image_file = media_info["image_file"]
+            media_type = "VIDEO" if media_info["is_video"] else "IMAGE"
             
-            if MediaProcessor.is_video_static(video_file):
-                logger.info(f"✂️ 移除靜態影片: {filename}")
-                try: os.remove(video_file)
-                except: pass
-                media_type = "IMAGE"
-            else:
-                db_file_path = video_file
-                db_filename = f"{filename}.mp4"
+            db_file_path = image_file
+            ai_file_path = image_file
+            db_filename = f"{filename}.jpg"
 
-        if os.path.exists(db_file_path) and os.path.exists(ai_file_path):
-            return db_file_path, ai_file_path, db_filename, media_type
-        return None, None, None, None
+            if media_type == "VIDEO" and video_file and os.path.exists(video_file):
+                MediaProcessor.merge_thumbnail_to_video(video_file, image_file)
+                if MediaProcessor.is_video_static(video_file):
+                    logger.info(f"✂️ 移除靜態影片: {filename}")
+                    try: os.remove(video_file)
+                    except: pass
+                    media_type = "IMAGE"
+                else:
+                    db_file_path = video_file
+                    db_filename = f"{filename}.mp4"
+
+            if db_file_path and os.path.exists(db_file_path):
+                # 確認 ai_file_path 存在
+                if not ai_file_path or not os.path.exists(ai_file_path):
+                    ai_file_path = db_file_path
+                valid_media.append((db_file_path, ai_file_path, db_filename, media_type))
+                
+        return valid_media # 🌟 回傳所有驗證過的檔案清單
 
     def process_one_account(self, system_name: str, account: str, current_whitelist: dict):
         """[完全保留原始邏輯] 處理單一帳號的所有邏輯 (限動 + 貼文)"""
@@ -103,15 +106,16 @@ class S1Producer:
                 logger.info("📸 檢查限動...")
                 for story in self.ig.L.get_stories(userids=[profile.userid]):
                     for item in story.get_items():
-                        self.redis.throttle_if_queue_full(max_size=3)
+                        # 🌟 效能解放：將佇列煞車調高到 200，讓 S1 暢通無阻
+                        self.redis.throttle_if_queue_full(max_size=200)
                         
                         if self.ig.is_repost(item, is_story=True, system_name=system_name):
                             logger.info(f"⏭️ 跳過限動轉發: {item.date_local}")
                             continue
 
-                        db_path, ai_path, fn, mt = self.process_media_pipeline(item, system_name, is_story=True)
-                        if db_path:
-                            # 🌟 調用改寫後的 S3 派發邏輯
+                        # 🌟 修正：改用迴圈處理回傳的檔案清單 (支援多圖/多檔)
+                        results = self.process_media_pipeline(item, system_name, is_story=True)
+                        for db_path, ai_path, fn, mt in results:
                             self._save_and_dispatch(system_name, account, fn, db_path, ai_path, mt, "STORY")
 
             # --- Posts (貼文) ---
@@ -122,7 +126,8 @@ class S1Producer:
             scan_completed = False
 
             for post in self.ig.safe_generator(profile.get_posts()):
-                self.redis.throttle_if_queue_full(max_size=3)
+                # 🌟 效能解放：將佇列煞車調高到 200
+                self.redis.throttle_if_queue_full(max_size=200)
 
                 # 🛑 原始邏輯：置頂檢查
                 if self.checkpoints.is_post_pinned_safe(post) or post.shortcode in self.checkpoints.pinned_posts.get(account, []):
@@ -146,10 +151,10 @@ class S1Producer:
                     break
 
                 # 🛑 原始邏輯：下載處理
-                db_path, ai_path, fn, mt = self.process_media_pipeline(post, system_name)
-                if db_path:
-                    s_type = "REEL" if post.typename == "GraphVideo" else "POST"
-                    # 🌟 調用改寫後的 S3 派發邏輯
+                # 🌟 修正：改用迴圈處理回傳的檔案清單 (完美支援 IG 旋轉木馬多圖貼文)
+                results = self.process_media_pipeline(post, system_name)
+                for db_path, ai_path, fn, mt in results:
+                    s_type = "REEL" if getattr(post, 'typename', '') == "GraphVideo" else "POST"
                     self._save_and_dispatch(system_name, account, fn, db_path, ai_path, mt, s_type)
 
                 time.sleep(random.uniform(2, 5))
@@ -289,4 +294,4 @@ class S1Producer:
 if __name__ == "__main__":
     producer = S1Producer()
     # 預設執行單次隨機測試，若要跑正式模式請改為 producer.run()
-    producer.run_random_test()
+    producer.run()

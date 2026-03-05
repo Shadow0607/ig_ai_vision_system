@@ -9,7 +9,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from io import BytesIO
 from qdrant_client.http import models
-
+from concurrent.futures import ThreadPoolExecutor
 # 匯入核心模組
 from models.feature_extractor import FeatureExtractor
 from core_logic.feature_bank_manager import FeatureBankManager
@@ -104,43 +104,78 @@ class AIConsumer:
     def process_task(self, task_json: str):
         task = json.loads(task_json)
         profile = task.get("profile")
-        
+        stage = task.get("stage")
+        s3_uri = task.get('file_path')
+        media_id = task.get('task_id')
+
+        # ==========================================
+        # 🌟 嚴謹處理 1：冷啟動觸發的特徵庫批次重建
+        # ==========================================
         if task.get("type") == "BUILD_FEATURE_BANK":
+            logger.info(f"🛠️ [系統指令] 收到冷啟動指令，重建特徵庫: {profile}")
             self.bank_manager.build_feature_bank(profile)
             return
 
-        s3_uri = task.get('file_path')
-        media_id = task.get('task_id')
         if not s3_uri or not media_id:
-            logger.warning(f"⚠️ 媒體任務資料不完整: {task}")
+            logger.warning(f"⚠️ 任務資料不完整: {task}")
             return
 
-        # 🌟 關鍵修正：把 S1 送來的 s3:// 前綴濾掉
+        # 濾掉 s3:// 前綴
         bucket_prefix = f"s3://{self.router.bucket_name}/"
         s3_key = s3_uri.replace(bucket_prefix, "") if s3_uri.startswith(bucket_prefix) else s3_uri
 
-        # 1. 檔案不落地獲取串流
-        if not (stream := self.router.get_object_stream(s3_key)):
+        # 讀取實體檔案串流
+        stream = self.router.get_object_stream(s3_key)
+        if not stream:
             logger.warning(f"❌ S3 物件不存在: {s3_key}")
+            self.router.update_db_log(media_id, "ERROR_NOT_FOUND", False, 0.0)
             return
 
-        # 2. 影像解碼與特徵提取
+        # 影像解碼
         img_array = cv2.imdecode(np.frombuffer(stream.read(), np.uint8), cv2.IMREAD_COLOR)
         if img_array is None:
-            self._route_and_log(media_id, profile, s3_key, "ERROR", "ERROR_READ", False)
+            self.router.update_db_log(media_id, "ERROR_READ", False, 0.0)
             return
 
+        # ==========================================
+        # 🌟 嚴謹處理 2：手動頭像上傳的「防呆與校驗」
+        # ==========================================
+        if stage == "MANUAL_UPLOAD":
+            logger.info(f"🛡️ [嚴謹校驗] 開始檢查手動上傳的基準圖: {s3_key}")
+            
+            # 強制提取人臉特徵
+            target_embedding, face_detected = self.extractor.extract_target_embedding(img_array)
+            
+            if not face_detected:
+                logger.error(f"❌ [嚴謹校驗失敗] 手動上傳的照片中找不到人臉！攔截寫入。")
+                # 1. 將錯誤狀態寫回資料庫，覆蓋掉 C# 盲目給的 CONFIRMED
+                self.router.update_db_log(media_id, "REJECTED_NO_FACE", False, 0.0)
+                # 2. 把不合格的檔案從 pos/ 移出，避免污染未來的模型
+                self.router.move_file_safe(s3_key, "GARBAGE")
+                return
+            
+            # 若檢測成功，直接觸發該人物的特徵庫更新 (確保資料同步)
+            # 這裡為了避免併發重建，最佳做法是單點插入，但若你現有邏輯依賴 rebuild，可呼叫它
+            logger.info(f"✅ [嚴謹校驗通過] 成功提取手動頭像特徵，寫入大腦！")
+            self.bank_manager.build_feature_bank(profile)
+            
+            # 確保資料庫留下完美的紀錄
+            self.router.update_db_log(media_id, "CONFIRMED", True, 1.0)
+            return
+
+        # ==========================================
+        # 一般爬蟲照片的標準處理流程 (未命中 MANUAL_UPLOAD 的一般流程)
+        # ==========================================
         target_embedding, face_detected = self.extractor.extract_target_embedding(img_array)
         if not face_detected:
             self._route_and_log(media_id, profile, s3_key, "NOFACE", "NOFACE", False)
             return
 
-        # 3. 冷啟動檢查
         if self._is_cold_start(profile):
             self._route_and_log(media_id, profile, s3_key, "INITIAL_REVIEW", "INITIAL_REVIEW", True)
             return
 
-        # 4. 🧠 呼叫純 Qdrant 決策引擎
+        # 呼叫純 Qdrant 決策引擎
         db_threshold = self.router.get_person_threshold(profile)
         result, score, target_folder = DecisionEngine.compare_face_logic(
             target_embedding=target_embedding, 
@@ -152,22 +187,31 @@ class AIConsumer:
         status_map = {"MATCH_VSTACK": "OUTPUT", "HITL": "HITL", "GARBAGE": "REJECTED"}
         self._route_and_log(media_id, profile, s3_key, target_folder, status_map.get(result, "SKIP"), True, score)
 
-    def run(self):
-        logger.info(f"🚀 S2 AI Consumer 啟動 (純 S3 + Qdrant 雲端原生版)")
+    def run(self, max_workers=10):
+        """
+        啟動 AI 消費者，並使用執行緒池進行多任務併發處理。
+        :param max_workers: 同時開啟的 AI 工人數量 (預設 5 個)
+        """
+        logger.info(f"🚀 S2 AI Consumer 啟動 (純 S3 + Qdrant 雲端原生版) - 影分身 {max_workers} 人模式")
         queues = ["ig_processing_queue_high", "ig_processing_queue"]
         
-        while True:
-            if not (result := self.redis.brpop(queues, timeout=10)):
-                continue
-            
-            match result:
-                case ("ig_processing_queue_high", task_json):
-                    logger.info("⚡ [HIGH PRIORITY] 處理高優先級任務")
-                    self._safe_execute(task_json)
-                case (_, task_json):
-                    self._safe_execute(task_json)
+        # 🌟 建立執行緒池
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            while True:
+                # 這裡的主執行緒只負責一件事：當慣老闆，不斷從 Redis 拿任務
+                if not (result := self.redis.brpop(queues, timeout=10)):
+                    continue
+                
+                # 拿到任務後，立刻丟給空閒的工人去處理
+                match result:
+                    case ("ig_processing_queue_high", task_json):
+                        logger.info("⚡ [HIGH PRIORITY] 派發高優先級任務給空閒工人")
+                        executor.submit(self._safe_execute, task_json)
+                    case (_, task_json):
+                        executor.submit(self._safe_execute, task_json)
 
     def _safe_execute(self, task_json):
+        """包裝任務執行，確保單一執行緒崩潰不會影響整個系統"""
         try:
             self.process_task(task_json)
         except Exception as e:
@@ -175,4 +219,4 @@ class AIConsumer:
 
 if __name__ == "__main__":
     consumer = AIConsumer()
-    consumer.run()
+    consumer.run(max_workers=2)

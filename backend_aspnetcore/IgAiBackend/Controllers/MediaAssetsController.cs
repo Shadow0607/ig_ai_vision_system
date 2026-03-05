@@ -29,11 +29,11 @@ public class MediaAssetsController : ControllerBase
     {
         var query = _context.AiAnalysisLogs
             .Include(l => l.MediaAsset)
-            .Where(l => l.RecognitionStatus == status);
-
-        if (!string.IsNullOrEmpty(systemName))
-        {
-            query = query.Where(l => l.MediaAsset.SystemName == systemName);
+            .AsQueryable();
+        if (status == "REJECTED") {
+            query = query.Where(l => l.RecognitionStatus == "REJECTED" || l.RecognitionStatus == "GARBAGE" || l.RecognitionStatus == "SKIP");
+        } else {
+            query = query.Where(l => l.RecognitionStatus == status);
         }
 
         // 🌟 1. 計算總筆數與總頁數

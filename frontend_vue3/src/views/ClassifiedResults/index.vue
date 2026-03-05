@@ -9,6 +9,13 @@
             {{ person.displayName }} ({{ person.systemName }})
           </option>
         </select>
+        <button 
+          v-if="mediaList.length > 0" 
+          class="btn-select-all" 
+          @click="toggleSelectAll"
+        >
+          {{ isAllSelected ? '🔲 取消全選' : '☑️ 全選本頁' }}
+        </button>
       </div>
       
       <div class="status-tabs">

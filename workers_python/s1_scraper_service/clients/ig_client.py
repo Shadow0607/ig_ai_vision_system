@@ -134,23 +134,43 @@ class IGClient:
         return instaloader.Profile.from_username(self.L.context, account)
 
     def download_media(self, post, system_name: str, is_story: bool = False):
-        """執行實際下載並回傳檔案資訊"""
+        """🌟 修正版：執行下載並回傳『所有』相關檔案資訊 (支援多圖貼文)"""
         try:
             if is_story: 
                 self.L.download_storyitem(post, target=system_name)
             else: 
                 self.L.download_post(post, target=system_name)
 
-            filename = self.L.format_filename(post)
-            base_path = self.base_storage_path / system_name / "downloads" / filename
+            # 取得貼文基礎檔名
+            base_filename = self.L.format_filename(post)
+            downloads_dir = self.base_storage_path / system_name / "downloads"
             
-            return {
-                "filename": filename,
-                "video_file": f"{base_path}.mp4",
-                "image_file": f"{base_path}.jpg",
-                "is_video": post.is_video,
-                "typename": getattr(post, 'typename', 'Story' if is_story else 'POST')
-            }
+            import glob
+            # 🌟 使用 glob 找出所有屬於這篇貼文的媒體檔 (包含 _1, _2 等多圖)
+            all_files = glob.glob(str(downloads_dir / f"{base_filename}*"))
+            media_files = [f for f in all_files if f.endswith(('.jpg', '.mp4')) and "_temp" not in f]
+            
+            results = []
+            processed_stems = set()
+            
+            for f in media_files:
+                stem = Path(f).stem
+                if stem in processed_stems: continue # 避免重複處理
+                
+                video_path = downloads_dir / f"{stem}.mp4"
+                image_path = downloads_dir / f"{stem}.jpg"
+                is_video = video_path.exists()
+                
+                results.append({
+                    "filename": stem,
+                    "video_file": str(video_path) if is_video else None,
+                    "image_file": str(image_path) if image_path.exists() else None,
+                    "is_video": is_video,
+                    "typename": getattr(post, 'typename', 'Story' if is_story else 'POST')
+                })
+                processed_stems.add(stem)
+                
+            return results # 🌟 現在回傳的是一個 List
         except Exception as e:
             if "Too many queries" in str(e): raise e 
-            return None
+            return []
