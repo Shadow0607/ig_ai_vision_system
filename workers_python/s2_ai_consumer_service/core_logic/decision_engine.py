@@ -71,6 +71,6 @@ class DecisionEngine:
         if final_score >= db_threshold:
             return "MATCH_VSTACK", final_score, "OUTPUT" 
         elif hitl_line <= final_score < db_threshold:
-            return "HITL", final_score, "HITL"
+            return "PENDING", final_score, "PENDING"
         else:
             return "GARBAGE", final_score, "SKIP"

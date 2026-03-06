@@ -64,7 +64,8 @@
 .action-group { 
   display: flex; 
   gap: 8px; 
-  justify-content: center; /* 🌟 加上這行，讓按鈕群水平置中 */
+  justify-content: center;
+  min-width: 120px; /* 🌟 加上這行，讓按鈕群水平置中 */
 }
 .btn-icon {
   width: 34px; height: 34px; border-radius: 6px; border: 1px solid #444;
@@ -75,7 +76,12 @@
 .btn-deactivate:hover { border-color: #ff4d4f; background: rgba(255, 77, 79, 0.2); }
 .btn-activate:hover { border-color: #52c41a; background: rgba(82, 196, 26, 0.2); }
 .btn-delete:hover { background: #ff4d4f; border-color: #ff4d4f; color: #fff; }
-.btn-icon:disabled { opacity: 0.3; cursor: not-allowed; }
+button:disabled {
+  filter: grayscale(1);
+  opacity: 0.5;
+  cursor: not-allowed !important;
+  background: #333 !important;
+}
 .btn-reset:hover { border-color: #f39c12; background: rgba(243, 156, 18, 0.2); }
 /* =========================================
    3. 🌟 主表格樣式 (修復擁擠問題的關鍵)
@@ -233,7 +239,15 @@
 }
 
 .permissions-table tr:hover { background: #2a2d35; }
-.empty-state { text-align: center; padding: 40px; color: #aaa; font-size: 1.1rem; }
+.empty-state {
+  padding: 40px;
+  text-align: center;
+  color: #555;
+  font-size: 1.1rem;
+  background: #1a1a1a;
+  border-radius: 8px;
+  margin-top: 20px;
+}
 
 /* 彈窗內容放寬，容納 RoleManager 的表格 */
 .wide-modal {

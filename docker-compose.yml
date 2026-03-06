@@ -37,8 +37,8 @@ services:
     restart: always
     environment:
       # 🌟 修正：名稱對齊 .env 與 C# 程式碼
-      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
-      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -56,8 +56,8 @@ services:
       - minio
     environment:
       # 🌟 修正：名稱對齊 .env 與 C# 程式碼
-      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
-      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
     networks:
       - ai_net
     entrypoint: >

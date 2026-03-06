@@ -9,6 +9,7 @@ using Minio;
 using Minio.DataModel.Args;
 
 using Microsoft.AspNetCore.Authorization;
+using IgAiBackend.Helpers;
 
 namespace IgAiBackend.Controllers;
 
@@ -22,11 +23,6 @@ public class HitlApiController : ControllerBase
     private readonly IMinioClient _minioClient;
     private readonly string _bucketName;
     private readonly string _minioEndpoint;
-
-    private static readonly string[] ExcludedStatuses = new[]
-    {
-        "DOWNLOADED", "OUTPUT", "CONFIRMED", "REJECTED", "NOFACE", "MISSING_FILE", "INITIAL_REVIEW"
-    };
 
     public HitlApiController(
         ApplicationDbContext context,
@@ -45,8 +41,7 @@ public class HitlApiController : ControllerBase
     [HttpGet("pending")]
     public async Task<IActionResult> GetPendingHitl()
     {
-        // 🌟 1. 正確的 403 回傳方式，避免引發 500 錯誤
-        if (!await HasPermission("HitlDashboard", "View"))
+        if (!await PermissionHelper.HasPermissionAsync(_context, User, "HitlDashboard", "View", _redis))
             return StatusCode(403, new { message = "🚫 您沒有查看覆核數據的權限。" });
 
         try
@@ -54,12 +49,12 @@ public class HitlApiController : ControllerBase
             var pending = await _context.AiAnalysisLogs
                 .Include(a => a.MediaAsset)
                 .ThenInclude(m => m.Person)
-                .Where(a => !ExcludedStatuses.Contains(a.RecognitionStatus) && a.HitlConfirmed == null)
+                .Include(a => a.Status) // 🌟 必須 Include Status 才能讀取字典屬性
+                .Where(a => a.Status!.Code == "PENDING")
                 .Select(a => new
                 {
                     Id = a.Id,
                     MediaId = a.MediaId,
-                    // 🌟 2. 增加防呆：防止資料庫缺少關聯人物時發生 NullReferenceException
                     PersonName = a.MediaAsset != null && a.MediaAsset.Person != null
                                  ? (a.MediaAsset.Person.DisplayName ?? a.MediaAsset.Person.SystemName)
                                  : "Unknown",
@@ -72,7 +67,11 @@ public class HitlApiController : ControllerBase
                                 ? (a.MediaAsset.FilePath.EndsWith(".mp4")
                                     ? $"http://{_minioEndpoint}/{_bucketName}/{a.MediaAsset.FilePath.Replace(".mp4", ".jpg")}"
                                     : $"http://{_minioEndpoint}/{_bucketName}/{a.MediaAsset.FilePath}")
-                                : ""
+                                : "",
+                                
+                    // 🌟 架構師優化：一併帶回狀態的顯示名稱與顏色
+                    StatusName = a.Status!.DisplayName,
+                    StatusColor = a.Status!.UiColor
                 })
                 .ToListAsync();
 
@@ -84,23 +83,28 @@ public class HitlApiController : ControllerBase
             return StatusCode(500, new { message = "資料庫查詢錯誤，請查看後端 Log。" });
         }
     }
-
     [HttpPost("approve")]
-    [Authorize] // 🌟 記得加上 Authorize
+    [Authorize] 
     public async Task<IActionResult> ApproveHitl([FromBody] HitlApproveDto dto)
     {
-        if (!await HasPermission("HitlDashboard", "Update"))
+        if (!await PermissionHelper.HasPermissionAsync(_context, User, "HitlDashboard", "Update", _redis))
             return StatusCode(403, new { message = "🚫 您不具備執行覆核操作的權限。" });
+        
 
         long targetId = dto.ImageId ?? dto.Id ?? dto.MediaId ?? 0;
 
+        // 🌟 1. 取得核准的狀態 ID
+        var confirmedId = await _context.SysStatuses.Where(s => s.Category == "AI_RECOGNITION" && s.Code == "HITL_CONFIRMED").Select(s => s.Id).FirstOrDefaultAsync();
+
         var log = await _context.AiAnalysisLogs
             .Include(a => a.MediaAsset)
-            .FirstOrDefaultAsync(a => (a.MediaId == targetId || a.Id == targetId) && !ExcludedStatuses.Contains(a.RecognitionStatus));
+            .Include(a => a.Status)
+            .FirstOrDefaultAsync(a => (a.MediaId == targetId || a.Id == targetId) && a.Status!.Code == "PENDING");
 
         if (log == null || log.MediaAsset == null) return NotFound(new { message = "找不到該筆紀錄或已被處理" });
 
-        if (await ProcessSingleApproveAsync(log, log.MediaAsset.SystemName))
+        // 🌟 2. 傳入 confirmedId
+        if (await ProcessSingleApproveAsync(log, log.MediaAsset.SystemName, confirmedId)) 
         {
             await _context.SaveChangesAsync();
             await TriggerFeatureBankRebuild(log.MediaAsset.SystemName);
@@ -114,18 +118,22 @@ public class HitlApiController : ControllerBase
     [Authorize]
     public async Task<IActionResult> RejectHitl([FromBody] HitlRejectDto dto)
     {
-        if (!await HasPermission("HitlDashboard", "Delete"))
+        if (!await PermissionHelper.HasPermissionAsync(_context, User, "HitlDashboard", "Delete", _redis))
             return StatusCode(403, new { message = "🚫 您的帳號權限不足，無法執行排除操作（僅限管理員）。" });
 
         long targetId = dto.ImageId ?? dto.Id ?? dto.MediaId ?? 0;
 
+        // 🌟 1. 取得拒絕的狀態 ID
+        var rejectedId = await _context.SysStatuses.Where(s => s.Category == "AI_RECOGNITION" && s.Code == "REJECTED").Select(s => s.Id).FirstOrDefaultAsync();
+
         var log = await _context.AiAnalysisLogs
             .Include(a => a.MediaAsset)
-            .FirstOrDefaultAsync(a => (a.MediaId == targetId || a.Id == targetId) && !ExcludedStatuses.Contains(a.RecognitionStatus));
+            .Include(a => a.Status)
+            .FirstOrDefaultAsync(a => (a.MediaId == targetId || a.Id == targetId) && a.Status!.Code == "PENDING");
 
         if (log == null || log.MediaAsset == null) return NotFound(new { message = "找不到該筆紀錄或已被處理" });
 
-        if (await ProcessSingleRejectAsync(log, log.MediaAsset.SystemName))
+        if (await ProcessSingleRejectAsync(log, log.MediaAsset.SystemName, rejectedId))
         {
             await _context.SaveChangesAsync();
             await TriggerFeatureBankRebuild(log.MediaAsset.SystemName);
@@ -139,7 +147,7 @@ public class HitlApiController : ControllerBase
     [Authorize]
     public async Task<IActionResult> BatchApprove([FromBody] HitlBatchDto dto)
     {
-        if (!await HasPermission("HitlDashboard", "Update"))
+        if (!await PermissionHelper.HasPermissionAsync(_context, User, "HitlDashboard", "Update", _redis))
         {
             return StatusCode(403, new { message = "🚫 您的帳號權限不足，無法執行批次覆核。" });
         }
@@ -147,11 +155,12 @@ public class HitlApiController : ControllerBase
         if (dto.Ids == null || !dto.Ids.Any())
             return BadRequest(new { message = "未提供任何要處理的 ID" });
 
+        var confirmedId = await _context.SysStatuses.Where(s => s.Category == "AI_RECOGNITION" && s.Code == "HITL_CONFIRMED").Select(s => s.Id).FirstOrDefaultAsync();
+
         var logs = await _context.AiAnalysisLogs
             .Include(a => a.MediaAsset)
-            .Where(a => (dto.Ids.Contains(a.MediaId) || dto.Ids.Contains(a.Id)) &&
-                        !ExcludedStatuses.Contains(a.RecognitionStatus) &&
-                        a.HitlConfirmed == null)
+            .Include(a => a.Status)
+            .Where(a => (dto.Ids.Contains(a.MediaId) || dto.Ids.Contains(a.Id)) && a.Status!.Code == "PENDING")
             .ToListAsync();
 
         if (!logs.Any())
@@ -162,7 +171,7 @@ public class HitlApiController : ControllerBase
 
         foreach (var log in logs)
         {
-            if (log.MediaAsset != null && await ProcessSingleApproveAsync(log, log.MediaAsset.SystemName))
+            if (log.MediaAsset != null && await ProcessSingleApproveAsync(log, log.MediaAsset.SystemName, confirmedId))
             {
                 successCount++;
                 affectedProfiles.Add(log.MediaAsset.SystemName);
@@ -187,86 +196,61 @@ public class HitlApiController : ControllerBase
         return int.TryParse(claim, out int id) ? id : 3; // 預設 3 (Guest)
     }
 
-    private async Task<bool> HasPermission(string routeName, string action)
+    // 🌟 加入 newStatusId 參數，並移除 log.HitlConfirmed
+    private async Task<bool> ProcessSingleApproveAsync(AiAnalysisLog log, string systemName, int newStatusId)
     {
-        int roleId = GetCurrentRoleId();
-        var perm = await _context.RolePermissions
-            .Include(rp => rp.SystemRoute)
-            .FirstOrDefaultAsync(rp => rp.RoleId == roleId && rp.SystemRoute.RouteName == routeName);
-
-        if (perm == null || !perm.CanView) return false;
-
-        return action switch
+        if (await MoveObjectInS3Async(log, systemName, "pos", newStatusId, syncToOutput: true))
         {
-            "View" => perm.CanView,
-            "Update" => perm.CanUpdate,
-            "Delete" => perm.CanDelete,
-            "Create" => perm.CanCreate,
-            _ => false
-        };
-    }
-
-    private async Task<bool> ProcessSingleApproveAsync(AiAnalysisLog log, string systemName)
-    {
-        if (await MoveObjectInS3Async(log, systemName, "pos", "CONFIRMED", syncToOutput: true))
-        {
-            log.HitlConfirmed = true;
             log.HitlReviewedAt = DateTime.Now;
             return true;
         }
         return false;
     }
 
-    private async Task<bool> ProcessSingleRejectAsync(AiAnalysisLog log, string systemName)
+    // 🌟 加入 newStatusId 參數，並移除 log.HitlConfirmed
+    private async Task<bool> ProcessSingleRejectAsync(AiAnalysisLog log, string systemName, int newStatusId)
     {
-        if (await MoveObjectInS3Async(log, systemName, "GARBAGE", "REJECTED", syncToOutput: false))
+        if (await MoveObjectInS3Async(log, systemName, "GARBAGE", newStatusId, syncToOutput: false))
         {
-            log.HitlConfirmed = false;
             log.HitlReviewedAt = DateTime.Now;
             return true;
         }
         return false;
     }
 
-    // HitlApiController.cs 內部修改
-
-    private async Task<bool> MoveObjectInS3Async(AiAnalysisLog log, string systemName, string targetFolder, string newStatus, bool syncToOutput)
+    // 🌟 將 newStatus (string) 改成 newStatusId (int)
+    private async Task<bool> MoveObjectInS3Async(AiAnalysisLog log, string systemName, string targetFolder, int newStatusId, bool syncToOutput)
     {
         try
         {
             string sourceKey = log.MediaAsset.FilePath;
-            // 🌟 修正：改用字串分割獲取檔名，不再依賴 System.IO
             string fileName = sourceKey.Split('/').Last();
             string targetKey = $"{systemName}/{targetFolder}/{fileName}";
 
             if (sourceKey == targetKey) return true;
 
-            // 1. 搬移主檔案
             await S3CopyAndRemove(sourceKey, targetKey);
             if (syncToOutput)
             {
                 await S3CopyOnly(targetKey, $"{systemName}/OUTPUT/{fileName}");
             }
 
-            // 2. 處理影片縮圖
             if (sourceKey.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase))
             {
-                // 修正：使用 StringComparison 確保大小寫相容
                 string thumbSrc = sourceKey.Replace(".mp4", ".jpg", StringComparison.OrdinalIgnoreCase);
                 string thumbDest = targetKey.Replace(".mp4", ".jpg", StringComparison.OrdinalIgnoreCase);
 
                 await S3CopyAndRemove(thumbSrc, thumbDest);
                 if (syncToOutput)
                 {
-                    // 🌟 同樣移除 Path.GetFileName
                     string thumbFileName = thumbDest.Split('/').Last();
                     await S3CopyOnly(thumbDest, $"{systemName}/OUTPUT/{thumbFileName}");
                 }
             }
 
-            // 3. 更新資料庫
+            // 🌟 將狀態更新寫入 StatusId
             log.MediaAsset.FilePath = targetKey;
-            log.RecognitionStatus = newStatus;
+            log.StatusId = newStatusId; 
 
             return true;
         }

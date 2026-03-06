@@ -2,7 +2,7 @@
   <div class="profile-manager">
     <header class="header-actions">
       <h2>👤 目標人物管理</h2>
-      <button v-if="myPerms.canCreate" class="btn-primary" @click="openCreatePersonModal">+ 新增追蹤人物</button>
+      <button v-if="myPerms.hasAction('CREATE')" class="btn-primary" @click="openCreatePersonModal">+ 新增追蹤人物</button>
     </header>
 
     <div v-if="loading" class="loading-state">資料載入中...</div>
@@ -18,7 +18,7 @@
             <span class="icon-btn cancel" @click.stop="cancelEdit(person)">❌</span>
           </div>
 
-          <div v-else class="display-header" @click="myPerms.canUpdate ? startEdit(person) : null" :style="{ cursor: myPerms.canUpdate ? 'pointer' : 'default' }" :title="myPerms.canUpdate ? '點擊修改名稱' : ''">
+          <div v-else class="display-header" @click="myPerms.hasAction('UPDATE') ? startEdit(person) : null" :style="{ cursor: myPerms.hasAction('UPDATE') ? 'pointer' : 'default' }" :title="myPerms.hasAction('UPDATE') ? '點擊修改名稱' : ''">
             <div class="header-left-group">
               <div class="avatar-wrapper">
                 <img v-if="person.currentAvatar" :src="person.currentAvatar" class="person-avatar" />
@@ -27,14 +27,14 @@
               <div class="name-info">
                 <h3>
                   {{ person.displayName || person.systemName }}
-                  <span v-if="myPerms.canUpdate" class="edit-pencil">✏️</span>
+                  <span v-if="myPerms.hasAction('UPDATE')" class="edit-pencil">✏️</span>
                 </h3>
                 <span class="system-name-badge">@{{ person.systemName }}</span>
               </div>
             </div>
 
             <div style="display: flex; align-items: center; gap: 10px;">
-              <button v-if="myPerms.canDelete" class="icon-btn remove-btn" @click.stop="removePerson(person.id)" title="永久刪除此追蹤目標">🗑️</button>
+              <button v-if="myPerms.hasAction('DELETE')" class="icon-btn remove-btn" @click.stop="removePerson(person.id)" title="永久刪除此追蹤目標">🗑️</button>
             </div>
           </div>
         </div>
@@ -42,12 +42,12 @@
         <div class="card-body">
           <div class="control-group">
             <label>辨識門檻:</label>
-            <input type="number" step="0.05" min="0" max="1" v-model="person.threshold" @change="updatePersonConfig(person)" :disabled="!myPerms.canUpdate" />
+            <input type="number" step="0.05" min="0" max="1" v-model="person.threshold" @change="updatePersonConfig(person)" :disabled="!myPerms.hasAction('UPDATE')" />
           </div>
 
           <div class="control-group">
             <label>狀態:</label>
-            <select v-model="person.isActive" @change="updatePersonConfig(person)" :disabled="!myPerms.canUpdate">
+            <select v-model="person.isActive" @change="updatePersonConfig(person)" :disabled="!myPerms.hasAction('UPDATE')">
               <option :value="true">🟢 追蹤中</option>
               <option :value="false">🔴 暫停中</option>
             </select>
@@ -57,7 +57,7 @@
             <div class="control-group">
               <label>頭像照片 ({{ person.avatars?.length || 0 }}/5):</label>
               <input type="file" :id="'fileInput_' + person.systemName" style="display: none" multiple accept="image/*" @change="handleFileUpload($event, person)">
-              <button v-if="myPerms.canUpdate" class="icon-btn" @click.stop="triggerUpload(person.systemName)" title="上傳照片做為頭像">
+              <button v-if="myPerms.hasAction('UPDATE')" class="icon-btn" @click.stop="triggerUpload(person.systemName)" title="上傳照片做為頭像">
                 📤 上傳頭像
               </button>
             </div>
@@ -65,7 +65,7 @@
             <div class="avatars-gallery" v-if="person.avatars && person.avatars.length > 0">
               <div v-for="ava in person.avatars" :key="ava.id" class="avatar-thumb-box">
                 <img :src="ava.url" class="avatar-thumb" />
-                <button v-if="myPerms.canUpdate" class="btn-delete-thumb" @click.stop="deleteAvatar(ava.id)" title="移除此照片">✖</button>
+                <button v-if="myPerms.hasAction('UPDATE')" class="btn-delete-thumb" @click.stop="deleteAvatar(ava.id)" title="移除此照片">✖</button>
               </div>
             </div>
           </div>
@@ -75,7 +75,7 @@
             <ul class="accounts-list">
               <li v-for="acc in person.accounts" :key="acc.id">
                 <div class="display-account-row">
-                  <div class="acc-info" @click="myPerms.canUpdate ? openAccountModal(person, acc) : null" :style="{ cursor: myPerms.canUpdate ? 'pointer' : 'default' }">
+                  <div class="acc-info" @click="myPerms.hasAction('UPDATE') ? openAccountModal(person, acc) : null" :style="{ cursor: myPerms.hasAction('UPDATE') ? 'pointer' : 'default' }">
                     <div class="acc-name-row">
                       <i :class="['platform-icon', getPlatformIcon(acc.platformCode)]"></i>
                       <strong>{{ acc.accountName || '未命名' }}</strong>
@@ -87,16 +87,16 @@
                   </div>
 
                   <div class="acc-actions">
-                    <button v-if="myPerms.canUpdate" class="icon-btn" @click.stop="toggleAccountStatus(acc)" :title="acc.isMonitored ? '點擊暫停' : '點擊啟用'">
+                    <button v-if="myPerms.hasAction('UPDATE')" class="icon-btn" @click.stop="toggleAccountStatus(acc)" :title="acc.isMonitored ? '點擊暫停' : '點擊啟用'">
                       {{ acc.isMonitored ? '⏸️' : '▶️' }}
                     </button>
-                    <button v-if="myPerms.canUpdate" class="icon-btn edit-btn" @click.stop="openAccountModal(person, acc)">✏️</button>
-                    <button v-if="myPerms.canDelete" class="icon-btn remove-btn" @click.stop="removeAccount(acc.id)">✖</button>
+                    <button v-if="myPerms.hasAction('UPDATE')" class="icon-btn edit-btn" @click.stop="openAccountModal(person, acc)">✏️</button>
+                    <button v-if="myPerms.hasAction('DELETE')" class="icon-btn remove-btn" @click.stop="removeAccount(acc.id)">✖</button>
                   </div>
                 </div>
               </li>
             </ul>
-            <button v-if="myPerms.canUpdate" class="btn-outline" @click="openAccountModal(person)">+ 新增社群帳號</button>
+            <button v-if="myPerms.hasAction('UPDATE')" class="btn-outline" @click="openAccountModal(person)">+ 新增社群帳號</button>
           </div>
         </div>
       </div>

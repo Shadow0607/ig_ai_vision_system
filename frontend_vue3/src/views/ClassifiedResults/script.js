@@ -1,6 +1,6 @@
 import { ref, onMounted, nextTick, computed } from 'vue';
 import api from '@/api_clients/api.js';
-
+import { usePermissions } from '@/composables/usePermissions';
 export default {
   setup() {
     const mediaList = ref([]);
@@ -22,7 +22,7 @@ export default {
     // script.js
     const tabs = [
       { label: '🌟 本人(Match)', value: 'OUTPUT' },
-      { label: '❓ 待覆核(HITL)', value: 'HITL' },
+      { label: '❓ 待覆核(PENDING)', value: 'PENDING' },
       { label: '🗑️ 排除(Rejected)', value: 'REJECTED' }, // 這裡現在會包含 GARBAGE
       { label: '👤 無人臉(NoFace)', value: 'NOFACE' },
       { label: '⏩ 跳過(Skip)', value: 'SKIP' },     // 🌟 新增：看到被 AI 忽略的檔案
@@ -113,24 +113,29 @@ export default {
       }
     };
 
-    const reclassify = async (item, newStatus) => {
-      const actionName = newStatus === 'OUTPUT' ? '恢復為本人' : '移至排除區';
+    const reclassify = async (item, newStatusId) => {
+      // 🌟 修正 1：改用數字來判斷對話框文字 (假設 2 是 OUTPUT)
+      const actionName = newStatusId === 2 ? '恢復為本人' : '移至排除區';
       if (!confirm(`確定要將此影像 ${actionName} 嗎？`)) return;
 
       try {
-        await api.reclassifyMedia({ logId: item.id, newStatus: newStatus });
+        // 🌟 修正 2：明確將屬性命名為 newStatusId，精準對接後端的 DTO
+        await api.reclassifyMedia({ logId: item.id, newStatusId: newStatusId });
+        
         // 操作成功後，重新向後端拉取該頁資料，確保分頁總數正確
         await fetchData();
         selectedIds.value = selectedIds.value.filter(id => id !== item.id);
       } catch (err) { alert("操作失敗：" + (err.response?.data?.message || err.message)); }
     };
 
-    const batchReclassify = async (newStatus) => {
-      const actionName = newStatus === 'OUTPUT' ? '恢復為本人' : '移至排除區';
+    const batchReclassify = async (newStatusId) => {
+      // 🌟 修正 1：改用數字來判斷
+      const actionName = newStatusId === 2 ? '恢復為本人' : '移至排除區';
       if (!confirm(`確定要將這 ${selectedIds.value.length} 筆影像 ${actionName} 嗎？`)) return;
 
       try {
-        await api.batchReclassifyMedia({ logIds: selectedIds.value, newStatus: newStatus });
+        // 🌟 修正 2：明確將屬性命名為 newStatusId
+        await api.batchReclassifyMedia({ logIds: selectedIds.value, newStatusId: newStatusId });
         selectedIds.value = [];
         // 操作成功後，重新向後端拉取該頁資料
         await fetchData();

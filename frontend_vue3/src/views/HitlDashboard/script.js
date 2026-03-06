@@ -1,7 +1,7 @@
 /* src/views/HitlDashboard/script.js */
 import { ref, computed, onMounted } from 'vue';
 import api from '../../api_clients/api';
-
+import { usePermissions } from '@/composables/usePermissions';
 export default {
   name: 'HitlDashboard',
   setup() {
@@ -13,11 +13,7 @@ export default {
     const fullViewImage = ref(null);
 
     // 🌟 修正 1：直接讀取路由守衛準備好的全域安全記憶體
-    const myPerms = computed(() => {
-      const permissions = window.__USER_PERMISSIONS__ || [];
-      const p = permissions.find(item => item.routeName === 'HitlDashboard');
-      return p || { canView: true, canCreate: false, canUpdate: false, canDelete: false };
-    });
+    const { myPerms } = usePermissions('HitlDashboard');
 
     const fetchPendingImages = async () => {
       try {

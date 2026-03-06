@@ -60,7 +60,7 @@ export default {
       if (isLoggedIn.value) {
         if (confirm('確定要登出系統嗎？\nAre you sure you want to logout?')) {
           try { await api.logout(); } catch (e) { }
-          window.location.href = '/login'; // 🌟 登出後直接去登入頁
+          window.location.href = '/'; // 🌟 登出後直接去登入頁
         }
       } else {
         router.push('/login');

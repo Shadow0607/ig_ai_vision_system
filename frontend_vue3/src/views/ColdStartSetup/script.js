@@ -1,6 +1,6 @@
 import { ref, computed, onMounted } from 'vue'; 
 import api from '../../api_clients/api'; 
-
+import { usePermissions } from '@/composables/usePermissions';
 export default {
   name: 'ColdStartSetup',
   setup() {
@@ -16,11 +16,7 @@ export default {
     const uploadTarget = ref('');
 
     // 計算權限旗標
-    const myPerms = computed(() => {
-      const permissions = window.__USER_PERMISSIONS__ || [];
-      const p = permissions.find(item => item.routeName === 'ColdStartSetup');
-      return p || { canView: true, canCreate: false, canUpdate: false, canDelete: false };
-    });
+    const { myPerms } = usePermissions('ColdStartSetup');
 
     const currentGroup = computed(() => {
       return pendingList.value[currentIndex.value] || null;

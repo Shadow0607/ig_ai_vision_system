@@ -222,10 +222,10 @@ builder.Services.AddHostedService<RedisMonitorService>();
 // ====================================================
 // 🌟 註冊 MinIO 服務 (改為直接讀取環境變數)
 // ====================================================
-var minioEndpoint = Environment.GetEnvironmentVariable("MINIO_ENDPOINT") ?? "localhost:9000";
-var minioAccessKey = Environment.GetEnvironmentVariable("MINIO_ACCESS_KEY");
-var minioSecretKey = Environment.GetEnvironmentVariable("MINIO_SECRET_KEY");
-var minioUseSsl = Environment.GetEnvironmentVariable("MINIO_USE_SSL")?.ToLower() == "true";
+var minioEndpoint = Environment.GetEnvironmentVariable("S3_ENDPOINT_URL") ?? "localhost:9000";
+var minioAccessKey = Environment.GetEnvironmentVariable("S3_ACCESS_KEY");
+var minioSecretKey = Environment.GetEnvironmentVariable("S3_SECRET_KEY");
+var minioUseSsl = Environment.GetEnvironmentVariable("S3_USE_SSL")?.ToLower() == "true";
 
 if (string.IsNullOrEmpty(minioAccessKey) || string.IsNullOrEmpty(minioSecretKey))
 {
@@ -265,4 +265,26 @@ app.MapHub<MonitorHub>("/hubs/monitor");
 Console.WriteLine($"🚀 後端伺服器啟動中... 監聽 Port: {listenPort}");
 Console.WriteLine($"👉 Swagger 文件: http://localhost:{listenPort}/swagger");
 
-app.Run();
+using (var scope = app.Services.CreateScope())
+{
+    var dbContext = scope.ServiceProvider.GetRequiredService<IgAiBackend.Data.ApplicationDbContext>();
+    var redis = scope.ServiceProvider.GetRequiredService<StackExchange.Redis.IConnectionMultiplexer>();
+    var dbRedis = redis.GetDatabase();
+
+    var statuses = dbContext.SysStatuses.ToList();
+    if (statuses.Any())
+    {
+        // 建立 HashEntry 陣列，格式為 "CATEGORY:CODE" -> ID
+        var hashEntries = statuses
+            .Select(s => new StackExchange.Redis.HashEntry($"{s.Category}:{s.Code}", s.Id))
+            .ToArray();
+
+        // 確保覆蓋舊快取
+        dbRedis.KeyDelete("sys:statuses");
+        dbRedis.HashSet("sys:statuses", hashEntries);
+        
+        Console.WriteLine($"🚀 [Redis Cache] 系統狀態字典已成功載入 Redis Hash (共 {hashEntries.Length} 筆)，Python 微服務可隨時拉取。");
+    }
+}
+
+app.Run(); // 這是原本 Program.cs 的最後一行

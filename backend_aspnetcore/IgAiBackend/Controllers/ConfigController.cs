@@ -56,26 +56,30 @@ public class ConfigController : ControllerBase
     [HttpGet("persons")]
     public async Task<IActionResult> GetAllPersons()
     {
+        // =========================================================
+        // 1. 第一段查詢：取得人物與其關聯的社群帳號 (乾淨俐落的 SQL)
+        // =========================================================
         var personsDb = await _context.TargetPersons
             .Include(p => p.SocialAccounts)
             .ThenInclude(sa => sa.Platform)
-            .Select(p => new
-            {
-                p.Id,
-                p.SystemName,
-                p.DisplayName,
-                p.Threshold,
-                p.IsActive,
-                Accounts = p.SocialAccounts.Select(sa => new { sa.Id, sa.AccountIdentifier, sa.AccountName, sa.IsMonitored, PlatformId = sa.PlatformId, PlatformCode = sa.Platform!.Code }),
+            .ToListAsync(); // 直接拉回記憶體
 
-                // 🌟 核心修正 1：改用 SystemName 尋找照片，絕對不會抓空
-                AvatarsDb = _context.MediaAssets
-                    .Where(m => m.SystemName == p.SystemName && m.SourceType == "MANUAL_UPLOAD")
-                    .Select(m => new { m.Id, m.FilePath })
-                    .ToList()
-            })
-            .ToListAsync();
+        // =========================================================
+        // 2. 第二段查詢：取得所有手動上傳的特徵照片 (避免在 Select 裡面跨表)
+        // =========================================================
+        var avatarsDb = await _context.MediaAssets
+            .Where(m => m.SourceType != null && m.SourceType.Code == "MANUAL_UPLOAD")
+            .Select(m => new { m.SystemName, m.Id, m.FilePath })
+            .ToListAsync(); // 直接拉回記憶體
 
+        // 將照片依照 SystemName 分組，轉換成 Dictionary 讓後續配對瞬間完成
+        var avatarsDict = avatarsDb
+            .GroupBy(a => a.SystemName)
+            .ToDictionary(g => g.Key, g => g.ToList());
+
+        // =========================================================
+        // 3. 記憶體組合 (LINQ to Objects)：完全沒有 EF Core 翻譯報錯風險
+        // =========================================================
         var result = personsDb.Select(p => new
         {
             p.Id,
@@ -83,14 +87,27 @@ public class ConfigController : ControllerBase
             p.DisplayName,
             p.Threshold,
             p.IsActive,
-            p.Accounts,
+            
+            // 組合帳號
+            Accounts = p.SocialAccounts.Select(sa => new 
+            { 
+                sa.Id, 
+                sa.AccountIdentifier, 
+                sa.AccountName, 
+                sa.IsMonitored, 
+                PlatformId = sa.PlatformId, 
+                PlatformCode = sa.Platform?.Code,
+                AccountTypeId = sa.AccountTypeId 
+            }),
 
-            // 🌟 核心修正 2：強制指定屬性名稱為小寫 (avatars, id, url)，精準對接 Vue 前端
-            avatars = p.AvatarsDb.Select(a => new
-            {
-                id = a.Id,
-                url = $"http://{_minioEndpoint}/{_bucketName}/{a.FilePath}"
-            })
+            // 🌟 修正：加上 (object) 強制轉型，解決編譯器三元運算子型別不一致的錯誤
+            avatars = avatarsDict.TryGetValue(p.SystemName, out var avatarList)
+                ? avatarList.Select(a => (object)new
+                {
+                    id = a.Id,
+                    url = $"http://{_minioEndpoint}/{_bucketName}/{a.FilePath}"
+                }).ToList()
+                : new List<object>()
         });
 
         return Ok(result);
@@ -178,24 +195,23 @@ public class ConfigController : ControllerBase
     // ==========================================
     // 🌟 11. 手動上傳 (加入 5 張數量限制防護)
     // ==========================================
-    [HttpPost("persons/{systemName}/upload")]
+   [HttpPost("persons/{systemName}/upload")]
     public async Task<IActionResult> UploadManualPhotos(string systemName, List<IFormFile> files, [FromServices] IMinioClient minioClient)
     {
+        if (!FileValidationHelper.IsValid(files, out string error)) return BadRequest(new { message = error });
 
-        if (!FileValidationHelper.IsValid(files, out string error))
-        {
-            return BadRequest(new { message = error });
-        }
-
-        // 檢查特徵圖 5 張上限 (這屬於業務邏輯，保留在 Controller)
         var person = await _context.TargetPersons.FirstOrDefaultAsync(p => p.SystemName == systemName);
         if (person == null) return NotFound(new { message = "找不到該目標人物" });
 
-        int currentCount = await _context.MediaAssets.CountAsync(m => m.SystemName == systemName && m.SourceType == "MANUAL_UPLOAD");
-        if (currentCount + files.Count > 5)
-        {
-            return BadRequest(new { message = $"該人物已達到 5 張特徵圖上限，目前已有 {currentCount} 張。" });
-        }
+        // 🌟 1. 預先查好所有的狀態 ID，避免在迴圈內重複查詢
+        var imgId = await _context.SysStatuses.Where(s => s.Category == "MEDIA_TYPE" && s.Code == "IMAGE").Select(s => s.Id).FirstOrDefaultAsync();
+        var vidId = await _context.SysStatuses.Where(s => s.Category == "MEDIA_TYPE" && s.Code == "VIDEO").Select(s => s.Id).FirstOrDefaultAsync();
+        var manualId = await _context.SysStatuses.Where(s => s.Category == "SOURCE_TYPE" && s.Code == "MANUAL_UPLOAD").Select(s => s.Id).FirstOrDefaultAsync();
+        var dlId = await _context.SysStatuses.Where(s => s.Category == "DOWNLOAD_STATUS" && s.Code == "DOWNLOADED").Select(s => s.Id).FirstOrDefaultAsync();
+        var seedId = await _context.SysStatuses.Where(s => s.Category == "AI_RECOGNITION" && s.Code == "SEED_PHOTO").Select(s => s.Id).FirstOrDefaultAsync();
+
+        int currentCount = await _context.MediaAssets.CountAsync(m => m.SystemName == systemName && m.SourceTypeId == manualId);
+        if (currentCount + files.Count > 5) return BadRequest(new { message = $"該人物已達到 5 張特徵圖上限，目前已有 {currentCount} 張。" });
 
         try
         {
@@ -206,52 +222,43 @@ public class ConfigController : ControllerBase
             {
                 if (file.Length == 0) continue;
                 string fileName = $"manual_{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}_{file.FileName}";
+                string headerKey = $"{systemName}/profile_header/{fileName}"; 
+                string posKey = $"{systemName}/pos/{fileName}";               
 
-                // 🚀 定義兩個路徑
-                string headerKey = $"{systemName}/profile_header/{fileName}"; // 供前端頭像顯示
-                string posKey = $"{systemName}/pos/{fileName}";               // 供 AI 訓練提取
-
-                // A. 上傳到 profile_header
                 using (var stream = file.OpenReadStream())
                 {
-                    var putArgs = new PutObjectArgs().WithBucket(_bucketName).WithObject(headerKey).WithStreamData(stream).WithObjectSize(file.Length).WithContentType(file.ContentType);
-                    await minioClient.PutObjectAsync(putArgs);
+                    await minioClient.PutObjectAsync(new PutObjectArgs().WithBucket(_bucketName).WithObject(headerKey).WithStreamData(stream).WithObjectSize(file.Length).WithContentType(file.ContentType));
                 }
 
-                // B. 複製到 pos 資料夾 (供 AI 特徵學習)
-                await minioClient.CopyObjectAsync(new CopyObjectArgs()
-                    .WithBucket(_bucketName)
-                    .WithObject(posKey)
-                    .WithCopyObjectSource(new CopySourceObjectArgs().WithBucket(_bucketName).WithObject(headerKey)));
+                await minioClient.CopyObjectAsync(new CopyObjectArgs().WithBucket(_bucketName).WithObject(posKey).WithCopyObjectSource(new CopySourceObjectArgs().WithBucket(_bucketName).WithObject(headerKey)));
 
-                // C. 寫入 MediaAssets (使用正則 ENUM 值 "MANUAL_UPLOAD")
+                // 🌟 2. 改用 ID 寫入 MediaAssets
                 var newMedia = new MediaAsset
                 {
                     PersonId = person.Id,
                     SystemName = systemName,
                     FileName = fileName,
                     FilePath = headerKey,
-                    MediaType = file.ContentType.Contains("video") ? "VIDEO" : "IMAGE",
-                    SourceType = "MANUAL_UPLOAD", // 🌟 必須完全符合 DB ENUM 定義
-                    DownloadStatus = "DOWNLOADED"
+                    MediaTypeId = file.ContentType.Contains("video") ? vidId : imgId,
+                    SourceTypeId = manualId,
+                    DownloadStatusId = dlId,
+                    CreatedAt = DateTime.UtcNow
                 };
                 _context.MediaAssets.Add(newMedia);
                 await _context.SaveChangesAsync();
 
-                // D. 直接標記為 CONFIRMED (避開 INITIAL_REVIEW)
+                // 🌟 3. 改用 ID 寫入 AiAnalysisLog
                 _context.AiAnalysisLogs.Add(new AiAnalysisLog
                 {
                     MediaId = newMedia.Id,
-                    RecognitionStatus = "CONFIRMED",
+                    StatusId = seedId,
                     ConfidenceScore = 1.0f,
                     ProcessedAt = DateTime.UtcNow
                 });
                 await _context.SaveChangesAsync();
 
-                // E. 推送給 Python (指向 pos 資料夾的路徑)
                 var taskPayload = new { task_id = newMedia.Id, profile = systemName, file_path = posKey, timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds(), stage = "MANUAL_UPLOAD" };
                 await db.ListLeftPushAsync("ig_processing_queue", JsonSerializer.Serialize(taskPayload));
-
                 successCount++;
             }
             return Ok(new { message = $"成功上傳 {successCount} 張照片並同步至訓練區" });

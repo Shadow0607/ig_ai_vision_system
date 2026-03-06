@@ -1,6 +1,8 @@
 import { ref, onMounted } from 'vue';
 import api from '@/api_clients/api.js';
 import RoleManager from '../RoleManager/index.vue';
+import { usePermissions } from '@/composables/usePermissions';
+
 export default {
     name: 'UserManagement',
     components: {
@@ -15,17 +17,19 @@ export default {
         const showResetModal = ref(false);
         const resettingUser = ref(null);
         const newPasswordInput = ref('');
+        const { myPerms } = usePermissions('UserManagement');
 
         const showModal = ref(false);
         const isSubmitting = ref(false);
         const newUser = ref({ username: '', password: '' });
 
-        // 🌟 新增：角色權限管理的狀態
+        // 🌟 角色權限管理的狀態
         const showRoleModal = ref(false);
         const selectedRoleId = ref('');
         const systemRoutes = ref([]);
         const editingPermissions = ref([]);
         const isSavingPerms = ref(false);
+        const availableActions = ref([]);
 
         const fetchData = async () => {
             isLoading.value = true;
@@ -49,7 +53,6 @@ export default {
         const handleCreateUser = async () => {
             isSubmitting.value = true;
             try {
-                // 這裡對接您既有的註冊 API
                 await api.register(newUser.value);
                 alert("新增成功！");
                 closeModal();
@@ -63,11 +66,9 @@ export default {
                 await api.updateUser(user.id, { roleId: user.roleId, isActive: user.isActive });
             }
             catch (error) {
-                // 🌟 修正：優先讀取 AuthController 傳來的 error.response.data.message
                 const errorMsg = error.response?.data?.message || "變更失敗";
                 alert(errorMsg);
-
-                await fetchData(); // 發生錯誤時，把畫面上選錯的下拉選單強制「彈回」原本的狀態
+                await fetchData(); 
             }
         };
 
@@ -76,7 +77,6 @@ export default {
                 await api.updateUser(user.id, { roleId: user.roleId, isActive: !user.isActive });
                 user.isActive = !user.isActive;
             } catch (error) {
-                // 🌟 修正：優先讀取 AuthController 傳來的 error.response.data.message
                 const errorMsg = error.response?.data?.message || "操作失敗";
                 alert(errorMsg);
             }
@@ -97,38 +97,37 @@ export default {
         };
 
         // ==========================================
-        // 🌟 新增：角色權限管理邏輯
+        // 🌟 角色權限管理邏輯 (移除重複宣告)
         // ==========================================
         const openRoleModal = async () => {
             selectedRoleId.value = '';
             editingPermissions.value = [];
             showRoleModal.value = true;
             try {
-                // 獲取系統所有可用頁面
-                const res = await api.getSystemRoutes();
-                systemRoutes.value = res.data;
+                // 同時抓取「系統路由清單」和「系統可用動作」
+                const [routesRes, actionsRes] = await Promise.all([
+                    api.getSystemRoutes(),
+                    api.getSysActions() // 🌟 呼叫剛寫好的 API
+                ]);
+                systemRoutes.value = routesRes.data;
+                availableActions.value = actionsRes.data; // 🌟 把後端回傳的動態陣列塞進去
             } catch (e) { console.error(e); }
         };
 
         const closeRoleModal = () => { showRoleModal.value = false; };
 
-        // 當選擇不同角色時，取得該角色的既有權限
         const onRoleChange = async () => {
             if (!selectedRoleId.value) return;
             try {
                 const res = await api.getRolePermissions(selectedRoleId.value);
                 const existingPerms = res.data;
 
-                // 將所有可用頁面映射到表格，並填入該角色的狀態
                 editingPermissions.value = systemRoutes.value.map(route => {
                     const ext = existingPerms.find(p => p.routeId === route.id);
                     return {
                         routeId: route.id,
                         title: route.title,
-                        canView: ext ? ext.canView : false,
-                        canCreate: ext ? ext.canCreate : false,
-                        canUpdate: ext ? ext.canUpdate : false,
-                        canDelete: ext ? ext.canDelete : false
+                        allowedActionIds: ext ? (ext.allowedActionIds || []) : [] 
                     };
                 });
             } catch (e) { console.error(e); }
@@ -143,9 +142,10 @@ export default {
             } catch (e) { alert('儲存失敗'); }
             finally { isSavingPerms.value = false; }
         };
+
         const openResetPasswordModal = (user) => {
             resettingUser.value = user;
-            newPasswordInput.value = ''; // 清空上次輸入
+            newPasswordInput.value = ''; 
             showResetModal.value = true;
         };
         const closeResetModal = () => {
@@ -170,13 +170,12 @@ export default {
         onMounted(fetchData);
 
         return {
-            users, roles, isLoading, showModal, isSubmitting, newUser,
+            myPerms,users, roles, isLoading, showModal, isSubmitting, newUser,
             openCreateModal, closeModal, handleCreateUser, updateUserRole,
             toggleUserStatus, handleDeleteUser, formatDate,
-            // 🌟 匯出權限管理方法給 Template
             showRoleModal, selectedRoleId, editingPermissions, isSavingPerms,
             openRoleModal, closeRoleModal, onRoleChange, saveRolePermissions,showRoleManager,
-            showResetModal, resettingUser, newPasswordInput,
+            showResetModal, resettingUser, newPasswordInput,availableActions,
             openResetPasswordModal, closeResetModal, handleResetPassword
         };
     }

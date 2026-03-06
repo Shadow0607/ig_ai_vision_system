@@ -4,6 +4,7 @@ using IgAiBackend.Data;
 using Microsoft.AspNetCore.Authorization;
 using Minio;
 using Minio.DataModel.Args;
+
 namespace IgAiBackend.Controllers;
 
 [ApiController]
@@ -20,27 +21,38 @@ public class MediaAssetsController : ControllerBase
         _context = context;
     }
 
+    // ==========================================
+    // 1. 取得分類影像清單
+    // ==========================================
     [HttpGet("classified")]
     public async Task<IActionResult> GetClassifiedMedia(
         [FromQuery] string status = "OUTPUT", 
         [FromQuery] string? systemName = null,
-        [FromQuery] int page = 1,         // 🌟 新增：當前頁碼 (預設第 1 頁)
-        [FromQuery] int pageSize = 50)    // 🌟 新增：每頁筆數 (預設 50 筆)
+        [FromQuery] int page = 1,         
+        [FromQuery] int pageSize = 50)    
     {
         var query = _context.AiAnalysisLogs
             .Include(l => l.MediaAsset)
+            .Include(l => l.Status) // 🌟 必須 Include Status，才能讀取到 Code
             .AsQueryable();
+
+        // 🌟 修正：利用 Status!.Code 進行字串判斷
         if (status == "REJECTED") {
-            query = query.Where(l => l.RecognitionStatus == "REJECTED" || l.RecognitionStatus == "GARBAGE" || l.RecognitionStatus == "SKIP");
+            query = query.Where(l => l.Status!.Code == "REJECTED" || l.Status!.Code == "GARBAGE" || l.Status!.Code == "SKIP");
+        } else if (status == "ALL") {
+            query = query.Where(l => l.Status!.Code != "DOWNLOADED"); // ALL 的情況
         } else {
-            query = query.Where(l => l.RecognitionStatus == status);
+            query = query.Where(l => l.Status!.Code == status);
         }
 
-        // 🌟 1. 計算總筆數與總頁數
+        if (!string.IsNullOrEmpty(systemName))
+        {
+            query = query.Where(l => l.MediaAsset.SystemName == systemName);
+        }
+
         int totalItems = await query.CountAsync();
         int totalPages = (int)Math.Ceiling(totalItems / (double)pageSize);
 
-        // 🌟 2. 進行分頁切割 (Skip & Take)
         var items = await query
             .OrderByDescending(l => l.ProcessedAt)
             .Skip((page - 1) * pageSize)
@@ -50,14 +62,18 @@ public class MediaAssetsController : ControllerBase
                 l.Id,
                 l.ConfidenceScore,
                 l.ProcessedAt,
-                l.RecognitionStatus,
+                RecognitionStatus = l.Status!.Code, // 保留 Code 讓前端寫邏輯判斷 (如顯示/隱藏按鈕)
+                
+                // 🌟 架構師優化：直接將動態字典餵給前端，解放前端 Hardcode
+                StatusName = l.Status!.DisplayName,
+                StatusColor = l.Status!.UiColor,    
+
                 SystemName = l.MediaAsset.SystemName,
                 FileName = l.MediaAsset.FileName,
                 Url = $"http://{_minioEndpoint}/{_bucketName}/{l.MediaAsset.FilePath}"
             })
             .ToListAsync();
 
-        // 🌟 3. 回傳包含分頁資訊的複合式物件
         return Ok(new 
         { 
             Items = items, 
@@ -66,17 +82,17 @@ public class MediaAssetsController : ControllerBase
             CurrentPage = page 
         });
     }
-    // 1. 修正 DTO：給予預設值解決 Null 警告
-    public class ReclassifyRequestDto
-    {
-        public int LogId { get; set; }
-        public string NewStatus { get; set; } = string.Empty; // 🌟 加上預設值
-    }
 
-    // 2. 修正 MinIO 搬移邏輯
+    // ==========================================
+    // 2. 單筆分類更新 (拉回/排除)
+    // ==========================================
     [HttpPut("reclassify")]
     public async Task<IActionResult> ReclassifyMedia([FromBody] ReclassifyRequestDto request, [FromServices] IMinioClient minioClient)
     {
+        // 🌟 1. 修正：直接用前端傳來的 ID 查詢系統狀態實體
+        var targetStatus = await _context.SysStatuses.FindAsync(request.NewStatusId);
+        if (targetStatus == null) return BadRequest(new { message = "無效的狀態 ID" });
+
         var log = await _context.AiAnalysisLogs
             .Include(l => l.MediaAsset)
             .FirstOrDefaultAsync(l => l.Id == request.LogId);
@@ -87,9 +103,9 @@ public class MediaAssetsController : ControllerBase
         string sourceKey = log.MediaAsset.FilePath;
         string fileName = sourceKey.Split('/').Last();
 
-        // 決定目標資料夾
-        string targetFolder = request.NewStatus == "OUTPUT" ? "OUTPUT" :
-                              request.NewStatus == "REJECTED" ? "GARBAGE" : request.NewStatus;
+        // 🌟 2. 修正：透過查出來的 Code 決定資料夾走向
+        string targetFolder = targetStatus.Code == "OUTPUT" ? "OUTPUT" :
+                              targetStatus.Code == "REJECTED" ? "GARBAGE" : targetStatus.Code;
 
         string targetKey = $"{systemName}/{targetFolder}/{fileName}";
 
@@ -97,7 +113,6 @@ public class MediaAssetsController : ControllerBase
         {
             if (sourceKey != targetKey)
             {
-                // 🌟 修正：改用 WithCopyObjectSource
                 await minioClient.CopyObjectAsync(new CopyObjectArgs()
                     .WithBucket(_bucketName).WithObject(targetKey)
                     .WithCopyObjectSource(new CopySourceObjectArgs().WithBucket(_bucketName).WithObject(sourceKey)));
@@ -110,7 +125,6 @@ public class MediaAssetsController : ControllerBase
                     string thumbSrc = sourceKey.Replace(".mp4", ".jpg", StringComparison.OrdinalIgnoreCase);
                     string thumbDest = targetKey.Replace(".mp4", ".jpg", StringComparison.OrdinalIgnoreCase);
 
-                    // 🌟 修正：改用 WithCopyObjectSource
                     await minioClient.CopyObjectAsync(new CopyObjectArgs()
                         .WithBucket(_bucketName).WithObject(thumbDest)
                         .WithCopyObjectSource(new CopySourceObjectArgs().WithBucket(_bucketName).WithObject(thumbSrc)));
@@ -120,9 +134,9 @@ public class MediaAssetsController : ControllerBase
                 }
             }
 
-            // 更新資料庫
+            // 🌟 3. 寫入新的 StatusId
             log.MediaAsset.FilePath = targetKey;
-            log.RecognitionStatus = request.NewStatus;
+            log.StatusId = request.NewStatusId; 
             await _context.SaveChangesAsync();
 
             return Ok(new { message = "分類更新成功" });
@@ -132,20 +146,28 @@ public class MediaAssetsController : ControllerBase
             return StatusCode(500, new { message = $"S3 檔案搬移失敗: {ex.Message}" });
         }
     }
-    // 2. 在 MediaAssetsController 類別內加入批量處理 API
+
+    // ==========================================
+    // 3. 批量分類更新 (拉回/排除)
+    // ==========================================
     [HttpPut("batch-reclassify")]
     public async Task<IActionResult> BatchReclassifyMedia([FromBody] BatchReclassifyRequestDto request, [FromServices] IMinioClient minioClient)
     {
         if (request.LogIds == null || !request.LogIds.Any())
             return BadRequest(new { message = "未提供任何 ID" });
 
+        // 🌟 1. 修正：直接用前端傳來的 ID 查詢系統狀態實體
+        var targetStatus = await _context.SysStatuses.FindAsync(request.NewStatusId);
+        if (targetStatus == null) return BadRequest(new { message = "無效的狀態 ID" });
+
         var logs = await _context.AiAnalysisLogs
             .Include(l => l.MediaAsset)
             .Where(l => request.LogIds.Contains(l.Id))
             .ToListAsync();
 
-        string targetFolder = request.NewStatus == "OUTPUT" ? "OUTPUT" :
-                              request.NewStatus == "REJECTED" ? "GARBAGE" : request.NewStatus;
+        // 🌟 2. 修正：透過查出來的 Code 決定資料夾走向
+        string targetFolder = targetStatus.Code == "OUTPUT" ? "OUTPUT" :
+                              targetStatus.Code == "REJECTED" ? "GARBAGE" : targetStatus.Code;
 
         foreach (var log in logs)
         {
@@ -178,8 +200,9 @@ public class MediaAssetsController : ControllerBase
                         .WithBucket(_bucketName).WithObject(thumbSrc));
                 }
 
+                // 🌟 3. 寫入新的 StatusId
                 log.MediaAsset.FilePath = targetKey;
-                log.RecognitionStatus = request.NewStatus;
+                log.StatusId = request.NewStatusId; 
             }
             catch (Exception ex)
             {
@@ -190,16 +213,19 @@ public class MediaAssetsController : ControllerBase
         await _context.SaveChangesAsync();
         return Ok(new { message = $"成功更新 {logs.Count} 筆分類" });
     }
-
 }
+
+// ==========================================
+// 🌟 乾淨的 DTO 區塊 (全數改用整數 ID)
+// ==========================================
 public class ReclassifyRequestDto
 {
     public int LogId { get; set; }
-    public string NewStatus { get; set; } = string.Empty;// "OUTPUT", "REJECTED" 等
+    public int NewStatusId { get; set; } // 從 string NewStatus 改為 int ID
 }
 
 public class BatchReclassifyRequestDto
 {
-    public List<long> LogIds { get; set; } = new List<long>(); // 🌟 這裡把 List<int> 改成 List<long>
-    public string NewStatus { get; set; } = string.Empty;
+    public List<long> LogIds { get; set; } = new List<long>(); 
+    public int NewStatusId { get; set; } // 從 string NewStatus 改為 int ID
 }

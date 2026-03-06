@@ -9,7 +9,7 @@
         </p>
       </div>
 
-      <div class="header-actions" v-if="myPerms.canUpdate">
+      <div class="header-actions" v-if="myPerms.hasAction('UPDATE')">
         <select v-model="uploadTarget" class="account-select">
           <option value="" disabled>-- 選擇要手動上傳的帳號 --</option>
           <option v-for="person in personsList" :key="person.systemName" :value="person.systemName">
@@ -66,7 +66,7 @@
               已勾選 <strong>{{ selectedIds.length }}</strong> 張 / 展示前 {{ currentGroup.images.length }} 張
             </p>
           </div>
-          <div class="gallery-actions" v-if="myPerms.canUpdate">
+          <div class="gallery-actions" v-if="myPerms.hasAction('UPDATE')">
             <button class="btn-text" @click="selectAll">本頁全選</button>
             <button class="btn-text" @click="clearSelection">全不選</button>
           </div>
@@ -79,9 +79,9 @@
             class="img-card" 
             :class="{ 
               'selected': selectedIds.includes(img.mediaId), 
-              'readonly-mode': !myPerms.canUpdate 
+              'readonly-mode': !myPerms.hasAction('UPDATE')
             }"
-            @click="myPerms.canUpdate ? toggleSelection(img.mediaId) : null"
+            @click="myPerms.hasAction('UPDATE') ? toggleSelection(img.mediaId) : null"
           >
             <div class="media-wrapper">
               <template v-if="img.fileName.toLowerCase().endsWith('.mp4')">
@@ -103,7 +103,7 @@
               </div>
 
               <button 
-                  v-if="myPerms.canDelete"
+                  v-if="myPerms.hasAction('DELETE')"
                   class="btn-trash" 
                   @click.stop="rejectItem(img.mediaId)" 
                   title="排除此樣本"
@@ -125,7 +125,7 @@
           </div>
         </div>
 
-        <div class="gallery-footer" v-if="myPerms.canUpdate">
+        <div class="gallery-footer" v-if="myPerms.hasAction('UPDATE')">
           <p class="hint">💡 提示：只勾選正確照片，確認後將移動檔案並建立特徵庫。</p>
           <button 
             class="btn-confirm" 

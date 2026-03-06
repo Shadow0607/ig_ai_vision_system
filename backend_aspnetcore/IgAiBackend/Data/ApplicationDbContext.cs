@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using IgAiBackend.Models;
+using System.Collections.Generic;
 
 namespace IgAiBackend.Data
 {
@@ -13,12 +14,14 @@ namespace IgAiBackend.Data
         public DbSet<TargetPerson> TargetPersons { get; set; }
         public DbSet<SocialAccount> SocialAccounts { get; set; }
         public DbSet<SystemAlert> SystemAlerts { get; set; }
+        public DbSet<SysStatus> SysStatuses { get; set; }
+        public DbSet<SysAction> SysActions { get; set; } // 🌟 新增：系統動作字典表
 
         // 核心資料表
         public DbSet<MediaAsset> MediaAssets { get; set; }
         public DbSet<AiAnalysisLog> AiAnalysisLogs { get; set; }
 
-        // 🔐 權限管理核心表 (本次重點)
+        // 🔐 權限管理核心表
         public DbSet<User> Users { get; set; }
         public DbSet<Role> Roles { get; set; }
         public DbSet<SystemRoute> SystemRoutes { get; set; }
@@ -29,24 +32,36 @@ namespace IgAiBackend.Data
             base.OnModelCreating(modelBuilder);
 
             // =================================================
-            // 🌟 1. 設定 RolePermission 複合主鍵 (修正重點)
+            // 🌟 1. 設定 RolePermission 關聯與唯一約束
             // =================================================
+            // 廢除原本的 (RoleId, RouteId) 主鍵，改為確保「同一角色在同一路由的同一動作」不重複
             modelBuilder.Entity<RolePermission>()
-                .HasKey(rp => new { rp.RoleId, rp.RouteId });
+                .HasIndex(rp => new { rp.RoleId, rp.RouteId, rp.ActionId })
+                .IsUnique();
 
             modelBuilder.Entity<RolePermission>()
                 .HasOne(rp => rp.SystemRoute)
                 .WithMany(sr => sr.RolePermissions)
                 .HasForeignKey(rp => rp.RouteId);
 
-            // A. 先建立角色
+            // =================================================
+            // 🌟 2. 寫入基礎字典資料
+            // =================================================
             modelBuilder.Entity<Role>().HasData(
                 new Role { Id = 1, Code = "Admin", Name = "管理員" },
                 new Role { Id = 2, Code = "Reviewer", Name = "覆核員" },
                 new Role { Id = 3, Code = "Guest", Name = "訪客" }
             );
 
-            // B. 建立路由定義
+            // 寫入基礎動作 (Actions)
+            modelBuilder.Entity<SysAction>().HasData(
+                new SysAction { Id = 1, Code = "VIEW", DisplayName = "檢視" },
+                new SysAction { Id = 2, Code = "CREATE", DisplayName = "新增" },
+                new SysAction { Id = 3, Code = "UPDATE", DisplayName = "修改" },
+                new SysAction { Id = 4, Code = "DELETE", DisplayName = "刪除" },
+                new SysAction { Id = 5, Code = "APPROVE", DisplayName = "覆核" }
+            );
+
             modelBuilder.Entity<SystemRoute>().HasData(
                 new SystemRoute { Id = 1, RouteName = "HitlDashboard", Path = "/", Title = "HITL 人工覆核中心", Icon = "🎯", IsPublic = true },
                 new SystemRoute { Id = 2, RouteName = "SystemMonitor", Path = "/monitor", Title = "系統監控大盤", Icon = "📈", IsPublic = true },
@@ -56,74 +71,51 @@ namespace IgAiBackend.Data
                 new SystemRoute { Id = 6, RouteName = "ClassifiedResults", Path = "/classified", Title = "分類結果查看", Icon = "🖼️", IsPublic = false }
             );
 
-            // C. 建立管理員帳號 (注意：這裡要用 RoleId = 1)
             modelBuilder.Entity<User>().HasData(
                 new User
                 {
                     Id = 1,
                     Username = "admin",
                     PasswordHash = BCrypt.Net.BCrypt.HashPassword("123456"),
-                    RoleId = 1, // 🌟 這裡修正：由 Role 改為 RoleId
+                    RoleId = 1, 
                     IsActive = true,
                     CreatedAt = new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc)
                 }
             );
 
-            // D. 建立權限關聯 (讓 Admin 擁有所有非公開頁面權限)
-            modelBuilder.Entity<RolePermission>().HasData(
-                new RolePermission { RoleId = 1, RouteId = 1, CanView = true, CanCreate = true, CanUpdate = true, CanDelete = true }, // HITL
-                new RolePermission { RoleId = 1, RouteId = 2, CanView = true, CanCreate = true, CanUpdate = true, CanDelete = true }, // 🌟 補上這行 (系統監控)
-                new RolePermission { RoleId = 1, RouteId = 3, CanView = true, CanCreate = true, CanUpdate = true, CanDelete = true }, // 冷啟動
-                new RolePermission { RoleId = 1, RouteId = 4, CanView = true, CanCreate = true, CanUpdate = true, CanDelete = true }, // 人物管理
-                new RolePermission { RoleId = 1, RouteId = 5, CanView = true, CanCreate = true, CanUpdate = true, CanDelete = true },  // 權限管理
-                new RolePermission { RoleId = 1, RouteId = 6, CanView = true, CanCreate = true, CanUpdate = true, CanDelete = true } // 分類結果
-            );
-            modelBuilder.Entity<RolePermission>().HasData(
-                // 覆核員可以進「人工覆核中心」，可以執行「覆核疊加」，但不能「刪除樣本」
-                new RolePermission
+            // =================================================
+            // 🌟 3. 轉換舊版權限，以新版多筆紀錄 (ActionId) 的方式寫入
+            // =================================================
+            var rolePermissions = new List<RolePermission>();
+            int rpId = 1;
+
+            // D1. 管理員 (Admin) - 擁有全部頁面的全部權限
+            for (int route = 1; route <= 6; route++)
+            {
+                for (int action = 1; action <= 5; action++) // 1~5 包含 APPROVE
                 {
-                    RoleId = 2,
-                    RouteId = 1,
-                    CanView = true,
-                    CanCreate = false,
-                    CanUpdate = true,
-                    CanDelete = false
-                },
-                // 覆核員可以進「冷啟動建檔」，可以執行「特徵確認」，但不能「刪除/排除」
-                new RolePermission
-                {
-                    RoleId = 2,
-                    RouteId = 3,
-                    CanView = true,
-                    CanCreate = false,
-                    CanUpdate = true,
-                    CanDelete = false
+                    rolePermissions.Add(new RolePermission { Id = rpId++, RoleId = 1, RouteId = route, ActionId = action });
                 }
-            );
-            modelBuilder.Entity<RolePermission>().HasData(
-        // 訪客對「人工覆核中心」與「系統監控」只有 CanView 權限
-        new RolePermission
-        {
-            RoleId = 3,
-            RouteId = 1,
-            CanView = true,
-            CanCreate = false,
-            CanUpdate = false,
-            CanDelete = false
-        },
-        new RolePermission
-        {
-            RoleId = 3,
-            RouteId = 2,
-            CanView = true,
-            CanCreate = false,
-            CanUpdate = false,
-            CanDelete = false
-        }
-    );
+            }
+
+            // D2. 覆核員 (Reviewer)
+            // 路由1 (人工覆核): View, Update
+            rolePermissions.Add(new RolePermission { Id = rpId++, RoleId = 2, RouteId = 1, ActionId = 1 }); // VIEW
+            rolePermissions.Add(new RolePermission { Id = rpId++, RoleId = 2, RouteId = 1, ActionId = 3 }); // UPDATE
+            // 路由3 (冷啟動): View, Update
+            rolePermissions.Add(new RolePermission { Id = rpId++, RoleId = 2, RouteId = 3, ActionId = 1 }); // VIEW
+            rolePermissions.Add(new RolePermission { Id = rpId++, RoleId = 2, RouteId = 3, ActionId = 3 }); // UPDATE
+
+            // D3. 訪客 (Guest)
+            // 路由1 (人工覆核): View
+            rolePermissions.Add(new RolePermission { Id = rpId++, RoleId = 3, RouteId = 1, ActionId = 1 }); // VIEW
+            // 路由2 (系統監控): View
+            rolePermissions.Add(new RolePermission { Id = rpId++, RoleId = 3, RouteId = 2, ActionId = 1 }); // VIEW
+
+            modelBuilder.Entity<RolePermission>().HasData(rolePermissions);
 
             // =================================================
-            // 3. 設定 MediaAsset 與其他 (維持原樣)
+            // 4. 設定 MediaAsset 與其他
             // =================================================
             modelBuilder.Entity<MediaAsset>(entity =>
             {
@@ -133,13 +125,12 @@ namespace IgAiBackend.Data
 
             modelBuilder.Entity<AiAnalysisLog>(entity =>
             {
-                entity.HasIndex(l => l.RecognitionStatus);
+                entity.HasIndex(l => l.StatusId); 
                 entity.HasOne(l => l.MediaAsset)
                       .WithMany()
                       .HasForeignKey(l => l.MediaId)
                       .OnDelete(DeleteBehavior.Cascade);
             });
-
             modelBuilder.Entity<SocialAccount>(entity =>
             {
                 entity.HasIndex(s => new { s.PersonId, s.PlatformId, s.AccountIdentifier }).IsUnique();

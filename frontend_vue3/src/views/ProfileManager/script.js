@@ -1,7 +1,7 @@
 /* src/views/ProfileManager/script.js */
 import { ref, onMounted, computed } from 'vue';
 import api from '../../api_clients/api';
-
+import { usePermissions } from '@/composables/usePermissions';
 export default {
   setup() {
     const personsList = ref([]);
@@ -19,11 +19,7 @@ export default {
     const accountForm = ref({ platformId: 2, accountName: '', accountIdentifier: '', accountTypeId: 1 });
 
     // 🌟 解析權限 (徹底移除 localStorage，改用路由守衛配發的安全變數)
-    const myPerms = computed(() => {
-      const permissions = window.__USER_PERMISSIONS__ || [];
-      const p = permissions.find(item => item.routeName === 'ProfileManager');
-      return p || { canView: true, canCreate: false, canUpdate: false, canDelete: false };
-    });
+    const { myPerms } = usePermissions('ProfileManager');
 
     // =========================================
     // 2. 讀取資料 (修復大小寫相容與隨機頭像)

@@ -11,7 +11,7 @@
             <h3>待審核名單 ({{ pendingImages.length }})</h3>
             <span class="selection-status">已勾選 <strong>{{ selectedIds.length }}</strong> 張</span>
           </div>
-          <div class="gallery-actions" v-if="myPerms.canUpdate">
+          <div class="gallery-actions" v-if="myPerms.hasAction('UPDATE')">
             <button class="btn-outline" @click="selectAll">本頁全選</button>
             <button class="btn-outline" @click="clearSelection">取消選取</button>
           </div>
@@ -19,8 +19,8 @@
 
         <div class="image-grid">
           <div v-for="img in pendingImages" :key="img.id" class="img-card"
-            :class="{ 'selected': selectedIds.includes(img.id), 'readonly-mode': !myPerms.canUpdate }"
-            @click="myPerms.canUpdate ? toggleSelection(img.id) : null">
+            :class="{ 'selected': selectedIds.includes(img.id), 'readonly-mode': !myPerms.hasAction('UPDATE') }"
+            @click="myPerms.hasAction('UPDATE') ? toggleSelection(img.id) : null">
 
             <div class="media-wrapper">
               <template v-if="img.url.toLowerCase().endsWith('.mp4')">
@@ -42,6 +42,11 @@
 
             <div class="person-info">
               <span class="person-name" :title="img.personName">👤 {{ img.personName }}</span>
+              <span class="status-badge" 
+                    v-if="img.statusName" 
+                    :style="{ backgroundColor: img.statusColor || '#777' }">
+                {{ img.statusName }}
+              </span>
             </div>
 
             <div class="score-container">

@@ -78,17 +78,26 @@ public class MediaAsset
     [Column("file_path")]
     public string FilePath { get; set; } = string.Empty;
 
-    [Column("media_type")]
-    public string MediaType { get; set; } = "IMAGE"; // 簡化處理，存字串即可
+    [Column("media_type_id")]
+    public int MediaTypeId { get; set; }
+    
+    [ForeignKey("MediaTypeId")]  // 🌟 補上這個標籤
+    public SysStatus? MediaType { get; set; } 
 
-    [Column("source_type")]
-    public string SourceType { get; set; } = "UNKNOWN"; // 🟢 修正 3：對齊 SQL 的 DEFAULT 'UNKNOWN' [2]
+    [Column("source_type_id")]
+    public int SourceTypeId { get; set; }
+    
+    [ForeignKey("SourceTypeId")] // 🌟 補上這個標籤
+    public SysStatus? SourceType { get; set; } 
+
+    [Column("download_status_id")]
+    public int DownloadStatusId { get; set; }
+    
+    [ForeignKey("DownloadStatusId")] // 🌟 補上這個標籤
+    public SysStatus? DownloadStatus { get; set; }// 🟢 修正 3：對齊 SQL 的 DEFAULT 'UNKNOWN' [2]
 
     [Column("image_hash")]
-    public string? ImageHash { get; set; }
-
-    [Column("download_status")]
-    public string DownloadStatus { get; set; } = "PENDING";
+    public string? ImageHash { get; set; } 
 
     [Column("created_at")]
     public DateTime CreatedAt { get; set; } = DateTime.Now;
@@ -117,20 +126,20 @@ public class AiAnalysisLog
     [Column("confidence_score")]
     public float? ConfidenceScore { get; set; }
 
-    [Column("recognition_status")]
-    public string RecognitionStatus { get; set; } = "Miss";
+    // 🌟 1. 移除 RecognitionStatus 和 HitlConfirmed
+    // 🌟 2. 新增 StatusId 與其導航屬性
+    [Column("status_id")]
+    public int StatusId { get; set; }
 
-    [Column("hitl_confirmed")]
-    public bool? HitlConfirmed { get; set; } // Null=未審, True=通過, False=拒絕
+    [ForeignKey("StatusId")]
+    public SysStatus? Status { get; set; } // 對應 sys_statuses 表
 
-    // 👇 新增這個遺漏的欄位映射 👇
     [Column("hitl_reviewed_at")]
     public DateTime? HitlReviewedAt { get; set; }
 
     [Column("processed_at")]
     public DateTime ProcessedAt { get; set; } = DateTime.Now;
 
-    // 關聯導航屬性
     [ForeignKey("MediaId")]
     public MediaAsset MediaAsset { get; set; } = null!;
 }
@@ -162,4 +171,17 @@ public class User
 
     [Column("is_active")]
     public bool IsActive { get; set; } = true;
+}
+[Table("sys_statuses")]
+public class SysStatus {
+    [Key]
+    public int Id { get; set; }
+    [Column("category")]
+    public required string Category { get; set; }
+    [Column("code")]
+    public required string Code { get; set; }
+    [Column("display_name")]
+    public required string DisplayName { get; set; }
+    [Column("ui_color")]
+    public string? UiColor { get; set; }
 }

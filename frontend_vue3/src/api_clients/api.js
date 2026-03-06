@@ -97,5 +97,5 @@ export default {
   createRole(data) { return apiClient.post('/auth/roles', data); },
   updateRole(id, data) { return apiClient.put(`/auth/roles/${id}`, data); },
   deleteRole(id) { return apiClient.delete(`/auth/roles/${id}`); },
-  
+  getSysActions: () => apiClient.get('/SysActions'),
 };

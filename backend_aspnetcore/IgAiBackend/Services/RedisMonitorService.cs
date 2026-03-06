@@ -25,37 +25,43 @@ public class RedisMonitorService : BackgroundService
     {
         var subscriber = _redis.GetSubscriber();
 
-        // 🌟 修正點：使用 RedisChannel.Literal 明確指定頻道名稱
+        // 🌟 1. 監聽 AI 處理完成訊號
         await subscriber.SubscribeAsync(RedisChannel.Literal("ai_task_completed"), async (channel, message) =>
         {
             Console.WriteLine("⚡ [Redis] 收到 AI 處理完成訊號，正在計算最新統計...");
 
-            // 透過 Scope 取得 DB Context
             using var scope = _serviceProvider.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
 
-            // 計算最新統計
             var successStatuses = new[] { "OUTPUT", "COMPLETED", "MATCH_VSTACK" };
             var skipStatuses = new[] { "SKIP", "REJECTED", "NOFACE", "GARBAGE", "AMBIGUOUS", "UNCERTAIN" };
 
-            var logs = await db.AiAnalysisLogs.Select(l => l.RecognitionStatus).ToListAsync();
+            // 🌟 修正點：加上 Include(l => l.Status) 並選取 Status!.Code
+            var logs = await db.AiAnalysisLogs
+                .Include(l => l.Status)
+                .Select(l => l.Status!.Code)
+                .ToListAsync();
+
             var stats = new
             {
                 successCount = logs.Count(s => successStatuses.Contains(s)),
                 skipCount = logs.Count(s => skipStatuses.Contains(s))
             };
 
-            // 透過 SignalR 廣播給所有開著大盤的前端
             await _hubContext.Clients.All.SendAsync("UpdateStatistics", JsonSerializer.Serialize(stats));
         });
+
+        // 🌟 2. 監聽系統告警訊號
         await subscriber.SubscribeAsync(RedisChannel.Literal("system_alert_new"), async (channel, message) =>
         {
             Console.WriteLine("🚨 [Redis] 收到新系統告警，推播給前端...");
+            
             using var scope = _serviceProvider.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
 
-            // 去資料庫抓最新的一筆告警
+            // 🌟 修正點：加上 Include(a => a.AlertType) 載入字典表
             var latestAlert = await db.SystemAlerts
+                .Include(a => a.AlertType)
                 .OrderByDescending(a => a.CreatedAt)
                 .FirstOrDefaultAsync();
 
@@ -63,11 +69,12 @@ public class RedisMonitorService : BackgroundService
             {
                 var alertDto = new
                 {
-                    type = latestAlert.AlertType,
+                    // 🌟 修正點：讀取 AlertType!.Code
+                    type = latestAlert.AlertType!.Code,
                     message = $"[{latestAlert.SourceComponent}] {latestAlert.Message}",
                     timestamp = latestAlert.CreatedAt.ToString("yyyy-MM-dd HH:mm:ss")
                 };
-                // 觸發 Vue 前端的 NewAlert 事件
+                
                 await _hubContext.Clients.All.SendAsync("NewAlert", JsonSerializer.Serialize(alertDto));
             }
         });

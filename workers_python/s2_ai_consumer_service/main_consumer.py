@@ -6,6 +6,18 @@ import logging
 import cv2
 import numpy as np
 from pathlib import Path
+script_dir = Path(__file__).resolve().parent
+workers_path = str(script_dir.parent)       # 🌟 指向 workers_python 目錄
+root_path = str(script_dir.parent.parent)   # 指向 ig_ai_vision_system 根目錄
+
+# 將 workers_python 加入搜尋路徑 (解決 from shared 找不到的問題)
+if workers_path not in sys.path:
+    sys.path.insert(0, workers_path)
+
+# 將根目錄加入搜尋路徑
+if root_path not in sys.path:
+    sys.path.insert(0, root_path)
+    
 from dotenv import load_dotenv
 from io import BytesIO
 from qdrant_client.http import models
@@ -148,7 +160,7 @@ class AIConsumer:
             
             if not face_detected:
                 logger.error(f"❌ [嚴謹校驗失敗] 手動上傳的照片中找不到人臉！攔截寫入。")
-                # 1. 將錯誤狀態寫回資料庫，覆蓋掉 C# 盲目給的 CONFIRMED
+                # 1. 將錯誤狀態寫回資料庫，覆蓋掉 C# 盲目給的 HITL_CONFIRMED
                 self.router.update_db_log(media_id, "REJECTED_NO_FACE", False, 0.0)
                 # 2. 把不合格的檔案從 pos/ 移出，避免污染未來的模型
                 self.router.move_file_safe(s3_key, "GARBAGE")
@@ -160,7 +172,7 @@ class AIConsumer:
             self.bank_manager.build_feature_bank(profile)
             
             # 確保資料庫留下完美的紀錄
-            self.router.update_db_log(media_id, "CONFIRMED", True, 1.0)
+            self.router.update_db_log(media_id, "HITL_CONFIRMED", True, 1.0)
             return
 
         # ==========================================
@@ -184,7 +196,7 @@ class AIConsumer:
             db_threshold=db_threshold
         )
 
-        status_map = {"MATCH_VSTACK": "OUTPUT", "HITL": "HITL", "GARBAGE": "REJECTED"}
+        status_map = {"MATCH_VSTACK": "OUTPUT", "PENDING": "PENDING", "GARBAGE": "REJECTED"}
         self._route_and_log(media_id, profile, s3_key, target_folder, status_map.get(result, "SKIP"), True, score)
 
     def run(self, max_workers=10):

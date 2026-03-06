@@ -3,28 +3,32 @@ import sys
 import time
 import random
 import logging
-import shutil
+import io  # 🌟 引入記憶體串流
 from pathlib import Path
 from dotenv import load_dotenv
+import redis
+script_dir = Path(__file__).resolve().parent
+workers_path = str(script_dir.parent)       # 🌟 指向 workers_python 目錄
+root_path = str(script_dir.parent.parent)   # 指向 ig_ai_vision_system 根目錄
 
-# 匯入原始模組
+# 將 workers_python 加入搜尋路徑 (解決 from shared 找不到的問題)
+if workers_path not in sys.path:
+    sys.path.insert(0, workers_path)
+
+# 將根目錄加入搜尋路徑 (解決 from workers_python.s2_ai_consumer_service... 找不到的問題)
+if root_path not in sys.path:
+    sys.path.insert(0, root_path)
+# 匯入原始模組 (請確保路徑正確)
 from clients.ig_client import IGClient
 from clients.redis_publisher import RedisPublisher
 from state_management.db_repository import DBRepository
 from state_management.checkpoint_tracker import CheckpointTracker
-from utils.media_ffmpeg import MediaProcessor
-script_dir = Path(__file__).resolve().parent
-# 假設 main_producer.py 在 workers_python/s1_producer/ 之下，向上推兩層就是根目錄
-root_path = str(script_dir.parent.parent)
+from utils.media_ffmpeg import MemoryMediaProcessor # 🌟 改用無狀態影音處理器
 
-if root_path not in sys.path:
-    sys.path.insert(0, root_path)
-
-# 🌟 匯入新版 S3 路由 (請確保 workers_python 相關路徑已加入 sys.path)
+# 匯入新版 S3 路由
 from workers_python.s2_ai_consumer_service.storage.file_router import FileAndDBRouter
 
 # 環境變數與日誌設定
-script_dir = Path(__file__).resolve().parent
 env_path = script_dir.parent.parent / '.env'
 load_dotenv(dotenv_path=env_path)
 
@@ -33,11 +37,9 @@ logger = logging.getLogger(__name__)
 
 class S1Producer:
     def __init__(self):
-        self.base_storage_path = script_dir.parent.parent / "temp_download"
-        if not self.base_storage_path.exists():
-            os.makedirs(self.base_storage_path)
+        # ❌ 徹底移除本地硬碟路徑 self.base_storage_path = ...
 
-        # 🌟 直接使用你寫好的 Router
+        # 🌟 1. 初始化 S3/MinIO Router
         self.router = FileAndDBRouter(
             db_host=os.getenv('DB_HOST'),
             db_port=os.getenv('DB_PORT'),
@@ -46,57 +48,62 @@ class S1Producer:
             db_name=os.getenv('DB_NAME')
         )
 
-        # 初始化原始模組
-        self.ig = IGClient(self.base_storage_path)
+        # 🌟 2. 初始化 IGClient (現在不需要傳入本地路徑，傳入 None 即可)
+        self.ig = IGClient(None) 
         self.redis = RedisPublisher()
         self.db = DBRepository()
-        self.checkpoints = CheckpointTracker(self.base_storage_path)
+        
+        # 🌟 3. 初始化全域 Redis 與 CheckpointTracker
+        self.raw_redis = redis.Redis(
+            host=os.getenv('REDIS_HOST', 'localhost'),
+            port=int(os.getenv('REDIS_PORT', 6379)),
+            password=os.getenv('REDIS_PASSWORD'),
+            decode_responses=True
+        )
+        self.checkpoints = CheckpointTracker(self.raw_redis)
 
         if not self.ig.initialize_login():
             sys.exit(1)
 
     def process_media_pipeline(self, post, system_name: str, is_story: bool = False):
-        """🌟 修正版：支援多圖管線處理"""
-        media_list = self.ig.download_media(post, system_name, is_story)
+        """🌟 全記憶體處理管線 (Pipeline)"""
+        # 注意：IGClient 必須實作 download_media_as_bytes，直接回傳位元組而不是存檔
+        media_list = self.ig.download_media_as_bytes(post, system_name, is_story)
         if not media_list: return []
 
         valid_media = []
         for media_info in media_list:
             filename = media_info["filename"]
-            video_file = media_info["video_file"]
-            image_file = media_info["image_file"]
-            media_type = "VIDEO" if media_info["is_video"] else "IMAGE"
+            video_bytes = media_info.get("video_bytes")
+            image_bytes = media_info.get("image_bytes")
+            media_type = "VIDEO" if media_info.get("is_video") else "IMAGE"
             
-            db_file_path = image_file
-            ai_file_path = image_file
+            main_bytes = image_bytes
+            ai_bytes = image_bytes
             db_filename = f"{filename}.jpg"
 
-            if media_type == "VIDEO" and video_file and os.path.exists(video_file):
-                MediaProcessor.merge_thumbnail_to_video(video_file, image_file)
-                if MediaProcessor.is_video_static(video_file):
-                    logger.info(f"✂️ 移除靜態影片: {filename}")
-                    try: os.remove(video_file)
-                    except: pass
+            # 🌟 在記憶體中進行影片處理
+            if media_type == "VIDEO" and video_bytes:
+                # 靜態影片偵測 (不落地)
+                if MemoryMediaProcessor.is_video_static_bytes(video_bytes):
+                    logger.info(f"✂️ 移除靜態影片，降級為圖片: {filename}")
                     media_type = "IMAGE"
                 else:
-                    db_file_path = video_file
+                    # 合併封面圖 (不落地)
+                    if image_bytes:
+                        video_bytes = MemoryMediaProcessor.merge_cover_to_video_bytes(video_bytes, image_bytes)
+                    
+                    main_bytes = video_bytes
+                    ai_bytes = image_bytes # AI 掃描專用的輕量縮圖
                     db_filename = f"{filename}.mp4"
 
-            if db_file_path and os.path.exists(db_file_path):
-                # 確認 ai_file_path 存在
-                if not ai_file_path or not os.path.exists(ai_file_path):
-                    ai_file_path = db_file_path
-                valid_media.append((db_file_path, ai_file_path, db_filename, media_type))
+            if main_bytes:
+                valid_media.append((main_bytes, ai_bytes, db_filename, media_type))
                 
-        return valid_media # 🌟 回傳所有驗證過的檔案清單
+        return valid_media
 
     def process_one_account(self, system_name: str, account: str, current_whitelist: dict):
-        """[完全保留原始邏輯] 處理單一帳號的所有邏輯 (限動 + 貼文)"""
         logger.info(f"\n🔍 開始掃描: {account} (@{system_name})")
-        
-        # 確保本地暫存目錄存在
-        downloads_dir = self.base_storage_path / system_name / "downloads"
-        downloads_dir.mkdir(parents=True, exist_ok=True)
 
         try:
             profile = self.ig.get_profile(account)
@@ -106,17 +113,15 @@ class S1Producer:
                 logger.info("📸 檢查限動...")
                 for story in self.ig.L.get_stories(userids=[profile.userid]):
                     for item in story.get_items():
-                        # 🌟 效能解放：將佇列煞車調高到 200，讓 S1 暢通無阻
                         self.redis.throttle_if_queue_full(max_size=200)
                         
                         if self.ig.is_repost(item, is_story=True, system_name=system_name):
                             logger.info(f"⏭️ 跳過限動轉發: {item.date_local}")
                             continue
 
-                        # 🌟 修正：改用迴圈處理回傳的檔案清單 (支援多圖/多檔)
                         results = self.process_media_pipeline(item, system_name, is_story=True)
-                        for db_path, ai_path, fn, mt in results:
-                            self._save_and_dispatch(system_name, account, fn, db_path, ai_path, mt, "STORY")
+                        for main_bytes, ai_bytes, fn, mt in results:
+                            self._save_and_dispatch_memory(system_name, account, fn, main_bytes, ai_bytes, mt, "STORY")
 
             # --- Posts (貼文) ---
             logger.info("📄 檢查貼文...")
@@ -126,21 +131,18 @@ class S1Producer:
             scan_completed = False
 
             for post in self.ig.safe_generator(profile.get_posts()):
-                # 🌟 效能解放：將佇列煞車調高到 200
                 self.redis.throttle_if_queue_full(max_size=200)
 
-                # 🛑 原始邏輯：置頂檢查
-                if self.checkpoints.is_post_pinned_safe(post) or post.shortcode in self.checkpoints.pinned_posts.get(account, []):
+                # 🌟 使用新的 Redis Set 置頂檢查邏輯 (支援多容器併發)
+                if self.checkpoints.is_post_pinned_safe(post) or self.checkpoints.is_already_pinned(account, post.shortcode):
                     self.checkpoints.update_pinned_list(account, post.shortcode)
                     logger.info(f"📌 跳過置頂: {post.shortcode}")
                     continue
 
-                # 🛑 原始邏輯：轉發過濾
                 if self.ig.is_repost(post, is_story=False, target_username=account, system_name=system_name, current_whitelist=current_whitelist):
                     logger.info(f"⏭️ 跳過轉發/非本人貼文 (Owner: {post.owner_username})")
                     continue
 
-                # 🛑 原始邏輯：檢查點判定
                 if is_first_post:
                     new_checkpoint = post.shortcode
                     is_first_post = False
@@ -149,17 +151,15 @@ class S1Producer:
                     logger.info(f"✓ 到達檢查點 {checkpoint}")
                     scan_completed = True
                     break
+                logger.info(f"⬇️ 開始下載與處理貼文: {post.shortcode} ...")
 
-                # 🛑 原始邏輯：下載處理
-                # 🌟 修正：改用迴圈處理回傳的檔案清單 (完美支援 IG 旋轉木馬多圖貼文)
                 results = self.process_media_pipeline(post, system_name)
-                for db_path, ai_path, fn, mt in results:
+                for main_bytes, ai_bytes, fn, mt in results:
                     s_type = "REEL" if getattr(post, 'typename', '') == "GraphVideo" else "POST"
-                    self._save_and_dispatch(system_name, account, fn, db_path, ai_path, mt, s_type)
+                    self._save_and_dispatch_memory(system_name, account, fn, main_bytes, ai_bytes, mt, s_type)
 
                 time.sleep(random.uniform(2, 5))
 
-            # 🛑 原始邏輯：交易式提交檢查點
             if new_checkpoint and (scan_completed or checkpoint is None):
                 self.checkpoints.save_checkpoint(system_name, account, new_checkpoint)
             else:
@@ -168,48 +168,58 @@ class S1Producer:
         except Exception as e:
             logger.error(f"❌ 帳號處理異常: {e}")
 
-    def _save_and_dispatch(self, system_name, account, fn, db_path, ai_path, mt, s_type):
-        """🌟 確保主檔案與 AI 檔案同步上傳，並清理本地"""
-        s3_key_main = f"{system_name}/downloads/{fn}" 
-        s3_key_ai = f"{system_name}/downloads/{os.path.basename(ai_path)}" 
+    def _save_and_dispatch_memory(self, system_name, account, fn, main_bytes, ai_bytes, mt, s_type):
+        """🌟 核心：記憶體直傳 MinIO/S3，完全不產生本地檔案"""
+        s3_key_main = f"{system_name}/downloads/{fn}"
+        ai_fn = fn.replace(".mp4", ".jpg")
+        s3_key_ai = f"{system_name}/downloads/{ai_fn}"
 
-        # 🌟 產生全域通用的 S3 URI
         s3_uri_main = f"s3://{self.router.bucket_name}/{s3_key_main}"
         s3_uri_ai = f"s3://{self.router.bucket_name}/{s3_key_ai}"
 
-        # 1. 透過 Router 上傳主檔案
-        if not self.router.upload_file(db_path, s3_key_main): 
-            return
-
-        # 2. 如果是影片，額外上傳縮圖
-        if ai_path != db_path:
-            self.router.upload_file(ai_path, s3_key_ai)
-
-        # 3. 寫入 DB (強制存入 s3_uri_main)
-        media_id, is_zombie = self.db.insert_media_record(system_name, account, fn, s3_uri_main, mt, s_type)
-        
-        if media_id is not None:
-            # 4. Redis 任務發送 S3 URI
-            payload = {
-                "task_id": media_id, 
-                "profile": system_name, 
-                "file_path": s3_uri_ai,        
-                "main_file_path": s3_uri_main, 
-                "media_type": mt,
-                "stage": "S1_S3_UPLOADED"
-            }
-            self.redis.push_task(payload, is_priority=(mt == "IMAGE"))
-
-        # 5. 檔案不落地：清理暫存
         try:
-            if os.path.exists(db_path): os.remove(db_path)
-            if ai_path != db_path and os.path.exists(ai_path): os.remove(ai_path)
+            # 1. 上傳主檔案 (影片或圖片)
+            # 🌟 修正：改用 Boto3 的嚴格關鍵字參數 (Bucket, Key, Body, ContentType)
+            content_type = "video/mp4" if mt == "VIDEO" else "image/jpeg"
+            self.router.s3_client.put_object(
+                Bucket=self.router.bucket_name, 
+                Key=s3_key_main,
+                Body=main_bytes, 
+                ContentType=content_type
+            )
+
+            # 2. 如果是影片且有 AI 縮圖，額外上傳縮圖供後端快速掃描
+            if ai_bytes and ai_bytes != main_bytes:
+                # 🌟 修正：改用 Boto3 語法
+                self.router.s3_client.put_object(
+                    Bucket=self.router.bucket_name, 
+                    Key=s3_key_ai,
+                    Body=ai_bytes, 
+                    ContentType="image/jpeg"
+                )
+
+            # 3. 寫入資料庫
+            media_id, is_zombie = self.db.insert_media_record(system_name, account, fn, s3_uri_main, mt, s_type)
             
-            parent_dir = os.path.dirname(db_path)
-            if os.path.exists(parent_dir) and not os.listdir(parent_dir):
-                shutil.rmtree(parent_dir, ignore_errors=True)
+            # 4. 推送 Redis 任務
+            if media_id is not None:
+                payload = {
+                    "task_id": media_id, 
+                    "profile": system_name, 
+                    "file_path": s3_uri_ai,
+                    "main_file_path": s3_uri_main, 
+                    "media_type": mt,
+                    "stage": "S1_STATLESS_UPLOADED"
+                }
+                self.redis.push_task(payload, is_priority=(mt == "IMAGE"))
+                # 🌟 補上這行：讓你知道任務成功丟給 S2 了
+                logger.info(f"🚀 成功推送任務至 S2 Queue: {fn}") 
+            else:
+                # 🌟 補上這行：讓你知道這張圖因為抓過所以被略過了
+                logger.info(f"♻️ DB 已有紀錄，略過 AI 辨識: {fn}")
+
         except Exception as e:
-            logger.error(f"⚠️ 暫存清理失敗: {e}")
+            logger.error(f"⚠️ 雲端直傳失敗: {e}")
 
     def watchdog_orphaned_downloads(self, profiles):
         """[雲端改寫版] 掃描 S3 孤兒檔案並重新推進 Redis"""
@@ -218,11 +228,9 @@ class S1Producer:
         recovered_count = 0
         
         queue_length = self.redis.get_queue_length()
-        # 🛑 原始邏輯：動態緩衝
         buffer_seconds = 10 if queue_length == 0 else 1800
         
         for system_name in profiles.keys():
-            # 🌟 向 S3 詢問該人物的下載區
             prefix = f"{system_name}/downloads/"
             try:
                 response = self.router.s3_client.list_objects_v2(
@@ -236,7 +244,6 @@ class S1Producer:
                     filename = os.path.basename(s3_key)
                     if not filename: continue
 
-                    # 🌟 檢查 S3 檔案時間戳記
                     last_modified = obj['LastModified'].timestamp()
                     file_age = current_time - last_modified
                     
@@ -261,8 +268,8 @@ class S1Producer:
             logger.info("✅ Watchdog 完成，S3 downloads 目錄健康。")
 
     def run_random_test(self):
-        """[完全保留原始邏輯] 隨機測試"""
-        logger.info("🧪 啟動 S1 Producer [隨機單次測試模式]...")
+        """隨機測試模式"""
+        logger.info("🧪 啟動 S1 Producer [隨機單次測試模式 - 雲原生版]...")
         profiles = self.db.get_dynamic_profiles()
         whitelist = self.db.get_dynamic_whitelist()
         
@@ -273,8 +280,8 @@ class S1Producer:
         self.process_one_account(target_sys, target_acc, whitelist)
 
     def run(self):
-        """[完全保留原始邏輯] 正式輪詢"""
-        logger.info("🔥 啟動 S1 Producer [正式運行模式 - S3 雲端版]...")
+        """正式輪詢模式"""
+        logger.info("🔥 啟動 S1 Producer [正式運行模式 - 雲原生無狀態版]...")
         while True:
             profiles = self.db.get_dynamic_profiles()
             whitelist = self.db.get_dynamic_whitelist()
@@ -293,5 +300,5 @@ class S1Producer:
 
 if __name__ == "__main__":
     producer = S1Producer()
-    # 預設執行單次隨機測試，若要跑正式模式請改為 producer.run()
-    producer.run()
+    # 預設執行正式模式。如果要單次測試，可改為 producer.run_random_test()
+    producer.run_random_test()

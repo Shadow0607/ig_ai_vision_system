@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import api from '../../api_clients/api';
 import * as signalR from '@microsoft/signalr'; 
+import { usePermissions } from '@/composables/usePermissions';
 
 export default {
   name: 'SystemMonitor',

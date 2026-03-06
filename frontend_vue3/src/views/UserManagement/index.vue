@@ -9,7 +9,7 @@
         <div class="header-stats">總帳號數: <strong>{{ users.length }}</strong></div>
         <button class="btn-role-alt" @click="showRoleManager = true">🎭 角色管理</button>
         <button class="btn-role" @click="openRoleModal">🛡️ 角色權限設定</button>
-        <button class="btn-create" @click="openCreateModal">➕ 新增使用者</button>
+        <button v-if="myPerms.hasAction('CREATE')" class="btn-create" @click="openCreateModal">➕ 新增使用者</button>
       </div>
     </header>
 
@@ -48,24 +48,25 @@
       </div>
     </div>
     <div v-if="showResetModal" class="modal-overlay" @click.self="closeResetModal">
-  <div class="modal-card">
-    <div class="modal-header">
-      <h3>🔑 重置密碼 - {{ resettingUser?.username }}</h3>
-      <button class="close-icon" @click="closeResetModal">×</button>
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3>🔑 重置密碼 - {{ resettingUser?.username }}</h3>
+          <button class="close-icon" @click="closeResetModal">×</button>
+        </div>
+        <form @submit.prevent="handleResetPassword" class="modal-body">
+          <div class="form-group">
+            <label>設定新密碼</label>
+            <input v-model="newPasswordInput" type="text" placeholder="請輸入新密碼..." required minlength="6" />
+            <small style="color:#aaa; display:block; margin-top:5px;">新密碼將會直接覆蓋原密碼。</small>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn-cancel" @click="closeResetModal">取消</button>
+            <button type="submit" class="btn-confirm"
+              :disabled="isSubmitting || newPasswordInput.length < 6">確認重置</button>
+          </div>
+        </form>
+      </div>
     </div>
-    <form @submit.prevent="handleResetPassword" class="modal-body">
-      <div class="form-group">
-        <label>設定新密碼</label>
-        <input v-model="newPasswordInput" type="text" placeholder="請輸入新密碼..." required minlength="6" />
-        <small style="color:#aaa; display:block; margin-top:5px;">新密碼將會直接覆蓋原密碼。</small>
-      </div>
-      <div class="modal-footer">
-        <button type="button" class="btn-cancel" @click="closeResetModal">取消</button>
-        <button type="submit" class="btn-confirm" :disabled="isSubmitting || newPasswordInput.length < 6">確認重置</button>
-      </div>
-    </form>
-  </div>
-   </div>
 
     <div v-if="showRoleModal" class="modal-overlay" @click.self="closeRoleModal">
       <div class="modal-card role-modal-card">
@@ -89,19 +90,17 @@
               <thead>
                 <tr>
                   <th>頁面功能</th>
-                  <th>檢視 <br><small>(View)</small></th>
-                  <th>新增 <br><small>(Create)</small></th>
-                  <th>修改 <br><small>(Update)</small></th>
-                  <th>刪除 <br><small>(Delete)</small></th>
+                  <th v-for="action in availableActions" :key="action.id">
+                    {{ action.name }} <br><small>({{ action.code }})</small>
+                  </th>
                 </tr>
               </thead>
               <tbody>
                 <tr v-for="perm in editingPermissions" :key="perm.routeId">
                   <td class="route-title">{{ perm.title }}</td>
-                  <td><input type="checkbox" v-model="perm.canView" /></td>
-                  <td><input type="checkbox" v-model="perm.canCreate" /></td>
-                  <td><input type="checkbox" v-model="perm.canUpdate" /></td>
-                  <td><input type="checkbox" v-model="perm.canDelete" /></td>
+                  <td v-for="action in availableActions" :key="action.id">
+                    <input type="checkbox" :value="action.id" v-model="perm.allowedActionIds" />
+                  </td>
                 </tr>
               </tbody>
             </table>
@@ -147,17 +146,17 @@
             <td class="date-cell">{{ formatDate(user.createdAt) }}</td>
             <td>
               <div class="action-group">
-                <button @click="openResetPasswordModal(user)" class="btn-icon btn-reset" title="重置密碼"
-                  :disabled="isLoading">
+                <button v-if="myPerms.hasAction('UPDATE')" @click="openResetPasswordModal(user)" class="btn-icon btn-reset"
+                  title="重置密碼" :disabled="isLoading">
                   🔑
                 </button>
-                <button @click="toggleUserStatus(user)"
+                <button v-if="myPerms.hasAction('UPDATE')" @click="toggleUserStatus(user)"
                   :class="['btn-icon', user.isActive ? 'btn-deactivate' : 'btn-activate']"
                   :title="user.isActive ? '停用帳號' : '恢復啟用'" :disabled="isLoading || user.username === 'admin'">
                   {{ user.isActive ? '🚫' : '✅' }}
                 </button>
-                <button @click="handleDeleteUser(user)" class="btn-icon btn-delete" title="永久刪除"
-                  :disabled="isLoading || user.username === 'admin'">
+                <button v-if="myPerms.hasAction('DELETE')" @click="handleDeleteUser(user)" class="btn-icon btn-delete"
+                  title="永久刪除" :disabled="isLoading || user.username === 'admin'">
                   🗑️
                 </button>
               </div>

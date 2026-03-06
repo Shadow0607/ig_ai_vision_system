@@ -25,25 +25,19 @@ public class MonitorController : ControllerBase
     [HttpGet("statistics")]
     public async Task<IActionResult> GetAiStatistics()
     {
-        // 抓取全域的 AI 分析日誌 [3]
+        // 🌟 修正：必須 Include(Status) 才能讀取 Code
         var logs = await _context.AiAnalysisLogs
-            .Select(l => l.RecognitionStatus)
+            .Include(l => l.Status)
+            .Select(l => l.Status!.Code)
             .ToListAsync();
 
-        // 定義哪些狀態屬於「成功」，哪些屬於「跳過/失敗」
-        // 依據 S2_Worker 的判定邏輯與 S4 狀態回寫 [8, 9]
         var successStatuses = new[] { "OUTPUT", "COMPLETED", "MATCH_VSTACK" };
         var skipStatuses = new[] { "SKIP", "REJECTED", "NOFACE", "GARBAGE", "AMBIGUOUS", "UNCERTAIN" };
 
         var successCount = logs.Count(status => successStatuses.Contains(status));
         var skipCount = logs.Count(status => skipStatuses.Contains(status));
 
-        // 回傳對應 Vue3 期待的 JSON 格式 [1]
-        return Ok(new 
-        { 
-            successCount = successCount, 
-            skipCount = skipCount 
-        });
+        return Ok(new { successCount = successCount, skipCount = skipCount });
     }
 
     // ==========================================
@@ -52,16 +46,17 @@ public class MonitorController : ControllerBase
     [HttpGet("alerts")]
     public async Task<IActionResult> GetSystemAlerts()
     {
-        // 撈取尚未解決的系統告警，依照時間由新到舊排序 [4, 6]
+        // 🌟 修正：必須 Include(AlertType) 才能讀取 Code
         var alerts = await _context.SystemAlerts
+            .Include(a => a.AlertType)
             .Where(a => !a.IsResolved)
             .OrderByDescending(a => a.CreatedAt)
-            .Take(5) // 取最新 5 筆即可
+            .Take(5)
             .Select(a => new
             {
                 id = a.Id,
-                type = a.AlertType,
-                message = $"[{a.SourceComponent}] {a.Message}", // 組合來源與訊息
+                type = a.AlertType!.Code, // 🌟 修正為讀取 Code
+                message = $"[{a.SourceComponent}] {a.Message}", 
                 timestamp = a.CreatedAt.ToString("yyyy-MM-dd HH:mm:ss")
             })
             .ToListAsync();

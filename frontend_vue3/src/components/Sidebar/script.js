@@ -1,32 +1,22 @@
-import { ref, computed, watchEffect } from 'vue';
-import { useRoute } from 'vue-router'; // 🌟 引入 useRoute
+import { ref, computed } from 'vue';
+import { authState } from '@/store/auth'; // 🌟 確保路徑指向你的 auth.ts
 
 export default {
   name: 'Sidebar',
   setup() {
-    const route = useRoute();
     const collapsed = ref(false);
-    
-    // 🌟 將權限轉為響應式變數
-    const permissions = ref(window.__USER_PERMISSIONS__ || []);
 
-    // 🌟 監聽路由變化：每次網址改變時，強制同步最新的權限狀態
-    watchEffect(() => {
-      const trigger = route.path; // 觸發依賴
-      if (window.__USER_PERMISSIONS__) {
-        permissions.value = window.__USER_PERMISSIONS__;
-      }
-    });
-    
+    // 🌟 關鍵：computed 會追蹤 authState 的變化
+    // 當 router 完成 API 請求並修改 authState 時，這裡會自動重新計算
     const filteredMenu = computed(() => {
-      // 改從響應式的 permissions 讀取
-      return permissions.value
-        .filter(p => p.canView)
+      return authState.permissions
+        .filter(p => p.isPublic || (p.actions && p.actions.includes('VIEW')))
         .map(p => ({
           name: p.routeName,
-          icon: p.icon || p.Icon || '📌',
-          text: p.title || p.Title || p.routeName,
-          path: p.routeName === 'ClassifiedResults' ? '/' : (p.path || p.Path || `/${p.routeName.toLowerCase()}`)
+          icon: p.icon || '📌',
+          text: p.title,
+          // 優先使用後端給的 path，如果沒有則根據名稱生成
+          path: p.path || (p.routeName === 'ClassifiedResults' ? '/' : `/${p.routeName.toLowerCase()}`)
         }));
     });
 
@@ -36,7 +26,7 @@ export default {
 
     return { 
       collapsed, 
-      filteredMenu, 
+      filteredMenu,
       handleClick 
     };
   }

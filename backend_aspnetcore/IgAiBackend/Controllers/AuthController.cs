@@ -7,7 +7,9 @@ using System.Text;
 using IgAiBackend.Data;
 using IgAiBackend.Models;
 using Microsoft.AspNetCore.Authorization;
-using System.Security.Cryptography; // 🌟 確保有引入這行
+using System.Security.Cryptography;
+using StackExchange.Redis;
+using System.Text.Json; // 🌟 新增：用於 Redis 快取的 JSON 序列化
 
 namespace IgAiBackend.Controllers;
 
@@ -18,11 +20,13 @@ public class AuthController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
     private readonly IConfiguration _configuration;
+    private readonly IConnectionMultiplexer _redis;
 
-    public AuthController(ApplicationDbContext context, IConfiguration configuration)
+    public AuthController(ApplicationDbContext context, IConfiguration configuration, IConnectionMultiplexer redis)
     {
         _context = context;
         _configuration = configuration;
+        _redis = redis;
     }
 
     public class LoginRequest
@@ -32,10 +36,69 @@ public class AuthController : ControllerBase
     }
 
     // =========================================================
-    // 1. 登入：抓取角色、權限路由清單與發放 Token
+    // 🌟 核心共用邏輯：取得權限 (包含 Redis 快取與 LINQ 壓平)
+    // =========================================================
+    private async Task<List<object>> GetFormattedPermissionsAsync(int roleId)
+    {
+        var cacheKey = $"ig_ai:perms:role:{roleId}";
+        var db = _redis.GetDatabase();
+
+        try
+        {
+            // 1. 嘗試從 Redis 讀取快取 (Zero-DB Query)
+            var cachedPerms = await db.StringGetAsync(cacheKey);
+            if (!cachedPerms.IsNullOrEmpty)
+            {
+                return JsonSerializer.Deserialize<List<object>>(cachedPerms!) ?? new List<object>();
+            }
+        }
+        catch { /* 忽略 Redis 連線錯誤，降級使用 DB 查詢 */ }
+
+        // 2. 快取未命中，執行資料庫查詢與 LINQ 分群
+        // 2. 快取未命中，執行資料庫查詢與 LINQ 分群
+        var permissionsQuery = await _context.RolePermissions
+            .Include(rp => rp.SystemRoute)
+            .Include(rp => rp.Action)
+            .Where(rp => rp.RoleId == roleId)
+            .Where(p => p.SystemRoute != null && p.Action != null) // 防呆：過濾髒資料
+            .GroupBy(p => new
+            {
+                p.SystemRoute.RouteName,
+                p.SystemRoute.Title,
+                p.SystemRoute.Path,
+                p.SystemRoute.IsPublic,
+                p.SystemRoute.Icon
+            })
+            .Select(g => new
+            {
+                routeName = g.Key.RouteName,
+                title = g.Key.Title,
+                path = g.Key.Path,
+                icon = g.Key.Icon,
+                isPublic = g.Key.IsPublic,
+                // 🌟 核心轉換：將群組內所有 Action.Code 選出來，並使用 Distinct() 防止重複
+                actions = g.Select(p => p.Action.Code).Distinct().ToList()
+            })
+            .ToListAsync(); // 🌟 修正點 1：將原本的 ToList() 改為 ToListAsync()，這樣才能被 await
+
+        // 🌟 修正點 2：等資料從 DB 非同步拉回來後，再於記憶體中轉換為 List<object>
+        var permissions = permissionsQuery.Cast<object>().ToList();
+
+        try
+        {
+            // 3. 寫入 Redis 快取，設定過期時間 (例如 24 小時)
+            await db.StringSetAsync(cacheKey, JsonSerializer.Serialize(permissions), TimeSpan.FromHours(24));
+        }
+        catch { /* 忽略 Redis 寫入錯誤 */ }
+
+        return permissions;
+    }
+
+    // =========================================================
+    // 1. 登入
     // =========================================================
     [HttpPost("login")]
-    [AllowAnonymous] 
+    [AllowAnonymous]
     public async Task<IActionResult> Login([FromBody] LoginRequest request)
     {
         var user = await _context.Users
@@ -43,92 +106,59 @@ public class AuthController : ControllerBase
             .SingleOrDefaultAsync(u => u.Username == request.Username);
 
         if (user == null || !BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash))
-        {
             return Unauthorized(new { message = "帳號或密碼錯誤" });
-        }
 
         if (!user.IsActive) return StatusCode(403, new { message = "帳號已被停用" });
 
-        var permissions = await _context.RolePermissions
-            .Where(rp => rp.RoleId == user.RoleId)
-            .Select(rp => new
-            {
-                path = rp.SystemRoute.Path,
-                title = rp.SystemRoute.Title,
-                icon = rp.SystemRoute.Icon,
-                isPublic = rp.SystemRoute.IsPublic,
-                routeName = rp.SystemRoute.RouteName,
-                canView = rp.CanView,
-                canCreate = rp.CanCreate,
-                canUpdate = rp.CanUpdate,
-                canDelete = rp.CanDelete
-            })
-            .ToListAsync();
+        // 🌟 使用高效能的快取讀取方法
+        var formattedPermissions = await GetFormattedPermissionsAsync(user.RoleId);
 
         var claims = new[]
         {
-            new Claim(JwtRegisteredClaimNames.Sub, user.Username),
+            new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
+            new Claim(ClaimTypes.Name, user.Username),
             new Claim(ClaimTypes.Role, user.Role.Code),
-            new Claim("RoleId", user.RoleId.ToString()),
-            new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
+            new Claim("RoleId", user.RoleId.ToString())
         };
 
-        // 🌟 核心修改 1：使用 RSA 私鑰與 RS256 演算法簽發 Token
         var privateKeyPem = Environment.GetEnvironmentVariable("JWT_PRIVATE_KEY")?.Replace("\\n", "\n");
-        if (string.IsNullOrWhiteSpace(privateKeyPem))
-        {
-            throw new InvalidOperationException("系統設定錯誤：缺少有效的 JWT_PRIVATE_KEY。");
-        }
+        if (string.IsNullOrWhiteSpace(privateKeyPem)) throw new InvalidOperationException("系統設定錯誤：缺少 JWT_PRIVATE_KEY");
 
         var rsa = RSA.Create();
         rsa.ImportFromPem(privateKeyPem);
         var securityKey = new RsaSecurityKey(rsa);
 
         var token = new JwtSecurityToken(
-            issuer: "IgAiSystem",
-            audience: "IgAiSystemFrontend",
-            claims: claims,
+            issuer: "IgAiSystem", audience: "IgAiSystemFrontend", claims: claims,
             expires: DateTime.UtcNow.AddHours(24),
             signingCredentials: new SigningCredentials(securityKey, SecurityAlgorithms.RsaSha256)
         );
-        var tokenString = new JwtSecurityTokenHandler().WriteToken(token);
 
-        var cookieOptions = new CookieOptions
+        Response.Cookies.Append("auth_token", new JwtSecurityTokenHandler().WriteToken(token), new CookieOptions
         {
-            HttpOnly = true, // 防止 XSS 攻擊
-            Secure = true,   // 確保只能在 HTTPS 下傳輸 (本機測試若沒 HTTPS 可暫時設 false，但強烈建議正式環境為 true)
-            SameSite = SameSiteMode.Lax, // 允許跨站攜帶 Cookie (針對前後端分離)
-            Expires = DateTime.UtcNow.AddHours(24)
-        };
-        Response.Cookies.Append("auth_token", tokenString, cookieOptions);
+            HttpOnly = true, Secure = true, SameSite = SameSiteMode.Lax, Expires = DateTime.UtcNow.AddHours(24)
+        });
 
-        // 回傳資料不再包含 Token
         return Ok(new
         {
             message = "登入成功",
-            user = new { username = user.Username, role = user.Role.Code }
+            user = new { username = user.Username, role = user.Role.Code },
+            permissions = formattedPermissions 
         });
     }
 
-    // =========================================================
-    // 2. 註冊：預設給予 RoleId = 2 (Reviewer)
-    // =========================================================
     [HttpPost("register")]
-    [AllowAnonymous] 
+    [AllowAnonymous]
     public async Task<IActionResult> Register([FromBody] LoginRequest request)
     {
         if (await _context.Users.AnyAsync(u => u.Username == request.Username))
-        {
             return BadRequest(new { message = "此帳號已經被註冊了" });
-        }
 
         var newUser = new User
         {
             Username = request.Username,
             PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.Password),
-            RoleId = 2,
-            IsActive = true,
-            CreatedAt = DateTime.UtcNow
+            RoleId = 2, IsActive = true, CreatedAt = DateTime.UtcNow
         };
 
         _context.Users.Add(newUser);
@@ -136,188 +166,147 @@ public class AuthController : ControllerBase
         return Ok(new { message = "註冊成功" });
     }
 
-    // =========================================================
-    // 3. 取得訪客 Token
-    // =========================================================
     [HttpGet("guest-token")]
     [AllowAnonymous]
     public async Task<IActionResult> GetGuestToken()
     {
-        var guestPermissions = await _context.RolePermissions
-            .Where(rp => rp.RoleId == 3)
-            .Select(rp => new
-            {
-                path = rp.SystemRoute.Path,
-                title = rp.SystemRoute.Title,
-                icon = rp.SystemRoute.Icon,
-                isPublic = rp.SystemRoute.IsPublic,
-                routeName = rp.SystemRoute.RouteName,
-                canView = rp.CanView,
-                canCreate = rp.CanCreate,
-                canUpdate = rp.CanUpdate,
-                canDelete = rp.CanDelete
-            })
-            .ToListAsync();
-
-        var claims = new[]
-        {
-            new Claim(JwtRegisteredClaimNames.Sub, "GuestUser"),
-            new Claim(ClaimTypes.Role, "Guest"),
-            new Claim("RoleId", "3"),
-            new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
+        int guestRoleId = 3; // 假設 3 是訪客
+        var formattedPermissions = await GetFormattedPermissionsAsync(guestRoleId);
+        
+        var claims = new[] {
+            new Claim(ClaimTypes.NameIdentifier, "GuestUser"),
+            new Claim(ClaimTypes.Role, "Guest")
         };
 
-        // 🌟 核心修改 2：訪客 Token 也要用同一把 RSA 私鑰簽發
         var privateKeyPem = Environment.GetEnvironmentVariable("JWT_PRIVATE_KEY")?.Replace("\\n", "\n");
-        if (string.IsNullOrWhiteSpace(privateKeyPem))
-        {
-            throw new InvalidOperationException("系統設定錯誤：缺少有效的 JWT_PRIVATE_KEY。");
-        }
+        if (string.IsNullOrWhiteSpace(privateKeyPem)) throw new InvalidOperationException("系統設定錯誤");
 
         var rsa = RSA.Create();
         rsa.ImportFromPem(privateKeyPem);
-        var securityKey = new RsaSecurityKey(rsa);
-
         var token = new JwtSecurityToken(
-            issuer: "IgAiSystem",
-            audience: "IgAiSystemFrontend",
-            claims: claims,
+            issuer: "IgAiSystem", audience: "IgAiSystemFrontend", claims: claims,
             expires: DateTime.UtcNow.AddHours(24),
-            signingCredentials: new SigningCredentials(securityKey, SecurityAlgorithms.RsaSha256) // 👉 改用 RsaSha256
+            signingCredentials: new SigningCredentials(new RsaSecurityKey(rsa), SecurityAlgorithms.RsaSha256)
         );
 
-        var tokenString = new JwtSecurityTokenHandler().WriteToken(token);
-
-        var cookieOptions = new CookieOptions
+        Response.Cookies.Append("auth_token", new JwtSecurityTokenHandler().WriteToken(token), new CookieOptions
         {
             HttpOnly = true, Secure = true, SameSite = SameSiteMode.Lax, Expires = DateTime.UtcNow.AddHours(24)
-        };
-        Response.Cookies.Append("auth_token", tokenString, cookieOptions);
+        });
 
-        return Ok(new { message = "訪客登入成功", user = new { username = "訪客 (Guest)", role = "Guest" } });
+        return Ok(new
+        {
+            message = "訪客登入成功",
+            user = new { username = "訪客 (Guest)", role = "Guest" },
+            permissions = formattedPermissions
+        });
     }
 
+    // =========================================================
+    // 4. 取得個人資訊 (GetMe) - 套用架構師建議
+    // =========================================================
     [HttpGet("me")]
     public async Task<IActionResult> GetMe()
     {
-        var username = User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? User.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
-        var roleIdStr = User.FindFirst("RoleId")?.Value;
+        var userIdStr = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
 
-        if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(roleIdStr)) 
-            return Unauthorized();
+        if (userIdStr == "GuestUser" || string.IsNullOrEmpty(userIdStr))
+            return await GetGuestResponse();
 
-        int roleId = int.Parse(roleIdStr);
-        
-        var permissions = await _context.RolePermissions
-            .Where(rp => rp.RoleId == roleId)
-            .Select(rp => new
-            {
-                path = rp.SystemRoute.Path,
-                title = rp.SystemRoute.Title,
-                icon = rp.SystemRoute.Icon,
-                isPublic = rp.SystemRoute.IsPublic,
-                routeName = rp.SystemRoute.RouteName,
-                canView = rp.CanView,
-                canCreate = rp.CanCreate,
-                canUpdate = rp.CanUpdate,
-                canDelete = rp.CanDelete
-            })
-            .ToListAsync();
+        if (!int.TryParse(userIdStr, out int userId)) return Unauthorized();
 
-        return Ok(new {
-            username = username,
-            role = User.FindFirst(ClaimTypes.Role)?.Value,
-            permissions = permissions
+        var user = await _context.Users
+            .Include(u => u.Role)
+            .SingleOrDefaultAsync(u => u.Id == userId);
+
+        if (user == null) return Unauthorized();
+
+        // 🌟 使用高效能的快取讀取方法
+        var formattedPermissions = await GetFormattedPermissionsAsync(user.RoleId);
+
+        return Ok(new
+        {
+            username = user.Username,
+            role = user.Role.Code,
+            permissions = formattedPermissions
         });
     }
+
     [HttpPost("logout")]
     public IActionResult Logout()
     {
         Response.Cookies.Delete("auth_token");
         return Ok(new { message = "已登出" });
     }
-    // =========================================================
-    // 4. 取得系統路由清單 (給權限管理頁面用)
-    // =========================================================
+
     [HttpGet("routes")]
     public async Task<IActionResult> GetSystemRoutes()
     {
-        var routes = await _context.SystemRoutes.ToListAsync();
-        return Ok(routes);
+        return Ok(await _context.SystemRoutes.ToListAsync());
     }
 
-    // =========================================================
-    // 5. 取得特定角色的權限設定
-    // =========================================================
     [HttpGet("roles/{roleId}/permissions")]
     public async Task<IActionResult> GetRolePermissions(int roleId)
     {
-        var perms = await _context.RolePermissions
+        var rawPerms = await _context.RolePermissions
             .Where(rp => rp.RoleId == roleId)
-            .Select(rp => new
-            {
-                rp.RouteId,
-                rp.CanView,
-                rp.CanCreate,
-                rp.CanUpdate,
-                rp.CanDelete
-            })
+            .Include(rp => rp.Action)
             .ToListAsync();
-        return Ok(perms);
+
+        var formattedPerms = rawPerms
+            .GroupBy(rp => rp.RouteId)
+            .Select(g => new
+            {
+                RouteId = g.Key,
+                AllowedActionIds = g.Select(x => x.ActionId).ToList()
+            })
+            .ToList();
+
+        return Ok(formattedPerms);
     }
 
-    // =========================================================
-    // 6. 批次更新特定角色權限
-    // =========================================================
     [HttpPut("roles/{roleId}/permissions")]
     public async Task<IActionResult> UpdateRolePermissions(int roleId, [FromBody] List<UpdateRolePermissionsDto> dtos)
     {
-        if (User.FindFirst(ClaimTypes.Role)?.Value != "Admin") return Forbid();
-
-        var roleExists = await _context.Roles.AnyAsync(r => r.Id == roleId);
-        if (!roleExists) return NotFound(new { message = "找不到該角色" });
-
-        var existingPerms = await _context.RolePermissions.Where(rp => rp.RoleId == roleId).ToListAsync();
-        _context.RolePermissions.RemoveRange(existingPerms);
-
-        foreach (var dto in dtos)
+        using var transaction = await _context.Database.BeginTransactionAsync();
+        try
         {
-            _context.RolePermissions.Add(new RolePermission
-            {
-                RoleId = roleId,
-                RouteId = dto.RouteId,
-                CanView = dto.CanView,
-                CanCreate = dto.CanCreate,
-                CanUpdate = dto.CanUpdate,
-                CanDelete = dto.CanDelete
-            });
-        }
+            var existingPerms = await _context.RolePermissions.Where(rp => rp.RoleId == roleId).ToListAsync();
+            _context.RolePermissions.RemoveRange(existingPerms);
 
-        await _context.SaveChangesAsync();
-        return Ok(new { message = "角色權限更新成功" });
+            var newPerms = new List<RolePermission>();
+            foreach (var dto in dtos)
+            {
+                if (dto.AllowedActionIds != null)
+                {
+                    foreach (var actionId in dto.AllowedActionIds)
+                    {
+                        newPerms.Add(new RolePermission { RoleId = roleId, RouteId = dto.RouteId, ActionId = actionId });
+                    }
+                }
+            }
+            
+            if (newPerms.Any()) await _context.RolePermissions.AddRangeAsync(newPerms);
+            await _context.SaveChangesAsync();
+            await transaction.CommitAsync();
+
+            // 🌟 權限變更後，主動清除該角色的 Redis 快取，強制下次讀取最新 DB 資料
+            try { await _redis.GetDatabase().KeyDeleteAsync($"ig_ai:perms:role:{roleId}"); } catch { }
+
+            return Ok(new { message = "權限更新成功" });
+        }
+        catch (Exception ex)
+        {
+            await transaction.RollbackAsync();
+            return StatusCode(500, new { message = "權限更新失敗", error = ex.Message });
+        }
     }
 
-    // =========================================================
-    // 8. 使用者 CRUD (僅限 Admin)
-    // =========================================================
     [HttpGet("users")]
     public async Task<IActionResult> GetAllUsers()
     {
         if (User.FindFirst(ClaimTypes.Role)?.Value != "Admin") return Forbid();
-
-        var users = await _context.Users
-            .Include(u => u.Role)
-            .Select(u => new
-            {
-                u.Id,
-                u.Username,
-                u.RoleId,
-                RoleName = u.Role.Name,
-                u.IsActive,
-                u.CreatedAt
-            })
-            .ToListAsync();
-
+        var users = await _context.Users.Include(u => u.Role).Select(u => new { u.Id, u.Username, u.RoleId, RoleName = u.Role.Name, u.IsActive, u.CreatedAt }).ToListAsync();
         return Ok(users);
     }
 
@@ -325,77 +314,50 @@ public class AuthController : ControllerBase
     public async Task<IActionResult> UpdateUser(int id, [FromBody] UpdateUserRequest request)
     {
         if (User.FindFirst(ClaimTypes.Role)?.Value != "Admin") return Forbid();
-
         var targetUser = await _context.Users.FindAsync(id);
         if (targetUser == null) return NotFound();
-
-        var currentUsername = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
-                           ?? User.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
-
-        if (targetUser.Username == currentUsername && (!request.IsActive || request.RoleId != 1))
-        {
-            return BadRequest(new { message = "您不能對自己進行降級或停權操作！" });
-        }
-
-        targetUser.RoleId = request.RoleId;
-        targetUser.IsActive = request.IsActive;
-
-        await _context.SaveChangesAsync();
-        return Ok(new { message = "更新成功" });
+        targetUser.RoleId = request.RoleId; targetUser.IsActive = request.IsActive;
+        await _context.SaveChangesAsync(); return Ok(new { message = "更新成功" });
     }
 
     [HttpDelete("users/{id}")]
     public async Task<IActionResult> DeleteUser(int id)
     {
-        if (User.FindFirst(ClaimTypes.Role)?.Value != "Admin")
-            return StatusCode(403, new { message = "權限不足，僅管理員可執行此操作" });
-
+        if (User.FindFirst(ClaimTypes.Role)?.Value != "Admin") return StatusCode(403, new { message = "權限不足" });
         var targetUser = await _context.Users.FindAsync(id);
-        if (targetUser == null) return NotFound(new { message = "找不到該名使用者" });
-
-        var currentUsername = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
-                           ?? User.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
-
-        if (targetUser.Username == currentUsername)
-        {
-            return BadRequest(new { message = "您不能刪除正在使用的帳號！" });
-        }
-
-        _context.Users.Remove(targetUser);
-        await _context.SaveChangesAsync();
-        return Ok(new { message = "帳號已永久刪除" });
+        if (targetUser == null) return NotFound();
+        _context.Users.Remove(targetUser); await _context.SaveChangesAsync(); return Ok(new { message = "已刪除" });
     }
+
     [HttpPut("users/{id}/reset-password")]
     public async Task<IActionResult> ResetUserPassword(int id, [FromBody] ResetPasswordRequest request)
     {
         if (User.FindFirst(ClaimTypes.Role)?.Value != "Admin") return Forbid();
-
         var targetUser = await _context.Users.FindAsync(id);
-        if (targetUser == null) return NotFound(new { message = "找不到該名使用者" });
-
-        // 重新 Hash 新密碼
+        if (targetUser == null) return NotFound();
         targetUser.PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.NewPassword);
-        
-        await _context.SaveChangesAsync();
-        return Ok(new { message = "密碼重置成功" });
+        await _context.SaveChangesAsync(); return Ok(new { message = "密碼重置成功" });
+    }
+
+    private async Task<IActionResult> GetGuestResponse()
+    {
+        int guestRoleId = 3;
+        var guestPermissions = await GetFormattedPermissionsAsync(guestRoleId);
+
+        return Ok(new
+        {
+            username = "GuestUser",
+            role = "Guest",
+            permissions = guestPermissions
+        });
     }
 }
 
-public class UpdateUserRequest
-{
-    public int RoleId { get; set; }
-    public bool IsActive { get; set; }
-}
+public class UpdateUserRequest { public int RoleId { get; set; } public bool IsActive { get; set; } }
+public class ResetPasswordRequest { public required string NewPassword { get; set; } }
 
 public class UpdateRolePermissionsDto
 {
     public int RouteId { get; set; }
-    public bool CanView { get; set; }
-    public bool CanCreate { get; set; }
-    public bool CanUpdate { get; set; }
-    public bool CanDelete { get; set; }
-}
-public class ResetPasswordRequest
-{
-    public required string NewPassword { get; set; }
+    public List<int> AllowedActionIds { get; set; } = new List<int>();
 }

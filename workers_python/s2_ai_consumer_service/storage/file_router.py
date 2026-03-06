@@ -4,7 +4,7 @@ import pymysql
 import logging
 from io import BytesIO
 from botocore.config import Config
-
+from shared.sys_status_manager import SysStatusManager
 logger = logging.getLogger(__name__)
 
 class FileAndDBRouter:
@@ -38,6 +38,7 @@ class FileAndDBRouter:
             config=Config(signature_version='s3v4'),
             region_name='us-east-1' # MinIO 預設相容 region
         )
+        self.status_manager = SysStatusManager()
 
     # ================= ☁️ S3 雲端檔案操作 (取代原本的本機寫入) =================
 
@@ -109,20 +110,30 @@ class FileAndDBRouter:
         finally:
             conn.close()
 
-    def update_db_log(self, media_id: int, status: str, face_detected: bool = False, score: float = 0.0):
+    def update_db_log(self, media_id: int, status_code: str, face_detected: bool = False, score: float = 0.0):
         if not media_id: return
+        
+        # 轉換為狀態 ID
+        status_id = self.status_manager.get_id("AI_RECOGNITION", status_code)
+        if not status_id:
+            logger.error(f"❌ 查無狀態碼 {status_code}，略過 DB 更新")
+            return
+
         conn = self._get_connection()
         try:
             with conn.cursor() as cursor:
+                # 🌟 欄位從 recognition_status 換成 status_id
                 sql = """
                     INSERT INTO ai_analysis_logs 
-                    (media_id, face_detected, recognition_status, confidence_score) 
+                    (media_id, face_detected, status_id, confidence_score) 
                     VALUES (%s, %s, %s, %s)
                 """
-                cursor.execute(sql, (media_id, 1 if face_detected else 0, status, score))
+                cursor.execute(sql, (media_id, 1 if face_detected else 0, status_id, score))
                 conn.commit()
-        except Exception as e: pass
-        finally: conn.close()
+        except Exception as e: 
+            logger.error(f"❌ DB 日誌更新失敗: {e}")
+        finally: 
+            conn.close()
 
     def update_media_asset_path(self, media_id: int, new_key: str):
         if not media_id or not new_key: return
