@@ -23,10 +23,10 @@ export default {
     const tabs = [
       { label: '🌟 本人(Match)', value: 'OUTPUT' },
       { label: '❓ 待覆核(PENDING)', value: 'PENDING' },
-      { label: '🗑️ 排除(Rejected)', value: 'REJECTED' }, // 這裡現在會包含 GARBAGE
-      { label: '👤 無人臉(NoFace)', value: 'NOFACE' },
-      { label: '⏩ 跳過(Skip)', value: 'SKIP' },     // 🌟 新增：看到被 AI 忽略的檔案
-      { label: '♻️ 垃圾桶(Garbage)', value: 'GARBAGE' } // 🌟 新增：看到徹底被過濾的檔案
+      // 🌟 將名稱改為綜合版，因為後端會同時撈出 REJECTED, GARBAGE, SKIP
+      { label: '🗑️ 排除與垃圾(Rejected)', value: 'REJECTED' }, 
+      { label: '👤 無人臉(NoFace)', value: 'NOFACE' }
+      // 🌟 直接刪除原本的 SKIP 與 GARBAGE 頁籤，讓介面更乾淨
     ];
     const fetchPersons = async () => {
       try {
@@ -114,30 +114,25 @@ export default {
     };
 
     const reclassify = async (item, newStatusId) => {
-      // 🌟 修正 1：改用數字來判斷對話框文字 (假設 2 是 OUTPUT)
-      const actionName = newStatusId === 2 ? '恢復為本人' : '移至排除區';
+      // 🌟 修正：對齊資料庫，4 代表 OUTPUT (AI判定成功)
+      const actionName = newStatusId === 4 ? '恢復為本人' : '移至排除區';
       if (!confirm(`確定要將此影像 ${actionName} 嗎？`)) return;
 
       try {
-        // 🌟 修正 2：明確將屬性命名為 newStatusId，精準對接後端的 DTO
         await api.reclassifyMedia({ logId: item.id, newStatusId: newStatusId });
-        
-        // 操作成功後，重新向後端拉取該頁資料，確保分頁總數正確
         await fetchData();
         selectedIds.value = selectedIds.value.filter(id => id !== item.id);
       } catch (err) { alert("操作失敗：" + (err.response?.data?.message || err.message)); }
     };
 
     const batchReclassify = async (newStatusId) => {
-      // 🌟 修正 1：改用數字來判斷
-      const actionName = newStatusId === 2 ? '恢復為本人' : '移至排除區';
+      // 🌟 修正：對齊資料庫，4 代表 OUTPUT
+      const actionName = newStatusId === 4 ? '恢復為本人' : '移至排除區';
       if (!confirm(`確定要將這 ${selectedIds.value.length} 筆影像 ${actionName} 嗎？`)) return;
 
       try {
-        // 🌟 修正 2：明確將屬性命名為 newStatusId
         await api.batchReclassifyMedia({ logIds: selectedIds.value, newStatusId: newStatusId });
         selectedIds.value = [];
-        // 操作成功後，重新向後端拉取該頁資料
         await fetchData();
       } catch (err) { alert("批量操作失敗：" + (err.response?.data?.message || err.message)); }
     };

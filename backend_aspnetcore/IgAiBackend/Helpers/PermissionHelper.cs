@@ -15,20 +15,30 @@ public static class PermissionHelper
         if (!int.TryParse(claim, out int roleId)) roleId = 3; // 預設 Guest
 
         var db = redis.GetDatabase();
-        // 設計 Redis Key，例如: ig_ai:perms:role:1
-        string cacheKey = $"ig_ai:perms:role:{roleId}"; 
-        
+
+        // 🌟 核心修正：換一個全新的 Key 名稱，避免跟前端的 JSON 選單打架！
+        string cacheKey = $"ig_ai:api_perms_hash:role:{roleId}";
         List<string>? actionCodes = null;
 
-        // 1. 嘗試從 Redis Hash 中讀取該路由的權限 (Zero-DB Query)
-        var cachedData = await db.HashGetAsync(cacheKey, routeName);
-
-        if (cachedData.HasValue)
+        try
         {
-            // Cache Hit: 反序列化 JSON 陣列 (例如: ["VIEW", "UPDATE"])
-            actionCodes = JsonSerializer.Deserialize<List<string>>(cachedData.ToString());
+            // 1. 嘗試從 Redis Hash 中讀取該路由的權限
+            var cachedData = await db.HashGetAsync(cacheKey, routeName);
+
+            if (cachedData.HasValue)
+            {
+                // Cache Hit: 反序列化純 JSON 陣列 (例如: ["VIEW", "UPDATE"])
+                actionCodes = JsonSerializer.Deserialize<List<string>>(cachedData.ToString());
+            }
         }
-        else
+        catch (Exception ex)
+        {
+            // 萬一 Redis 裡面有髒資料導致反序列化失敗，把這個壞掉的 key 刪除，強制走 DB
+            Console.WriteLine($"[Redis Warning] 權限快取讀取失敗，將重新查詢 DB: {ex.Message}");
+            await db.KeyDeleteAsync(cacheKey);
+        }
+
+        if (actionCodes == null)
         {
             // 2. Cache Miss: 乖乖去查資料庫 (多表 JOIN)
             actionCodes = await context.RolePermissions
@@ -41,15 +51,18 @@ public static class PermissionHelper
             // 3. 將查詢結果寫回 Redis Hash 供下次使用
             if (actionCodes.Any())
             {
-                await db.HashSetAsync(cacheKey, routeName, JsonSerializer.Serialize(actionCodes));
-                // 設定 24 小時過期，避免死資料佔用記憶體
-                await db.KeyExpireAsync(cacheKey, TimeSpan.FromHours(24)); 
+                try
+                {
+                    await db.HashSetAsync(cacheKey, routeName, JsonSerializer.Serialize(actionCodes));
+                    await db.KeyExpireAsync(cacheKey, TimeSpan.FromHours(24));
+                }
+                catch { /* 忽略寫入快取失敗，不影響主流程 */ }
             }
         }
 
         // 4. 進行權限比對
         if (actionCodes == null || !actionCodes.Contains("VIEW")) return false;
-        
+
         return actionCodes.Contains(action.ToUpper());
     }
 }

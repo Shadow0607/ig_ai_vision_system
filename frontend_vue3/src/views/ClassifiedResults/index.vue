@@ -43,8 +43,8 @@
           </div>
           <div class="card-actions">
             <button class="action-btn view" @click.stop="openFullView(item.url)" title="檢視原圖">🔍</button>
-            <button v-if="currentStatus !== 'REJECTED'" class="action-btn reject" @click.stop="reclassify(item, 4)" title="標示為錯誤並排除">🗑️</button>
-            <button v-if="currentStatus !== 'OUTPUT'" class="action-btn restore" @click.stop="reclassify(item, 2)" title="拉回並確認為本人">🌟</button>
+            <button v-if="currentStatus !== 'REJECTED'" class="action-btn reject" @click.stop="reclassify(item, 6)" title="標示為錯誤並排除">🗑️</button>
+            <button v-if="currentStatus !== 'OUTPUT'" class="action-btn restore" @click.stop="reclassify(item, 4)" title="拉回並確認為本人">🌟</button>
           </div>
         </div>
         <div class="media-info">
@@ -79,8 +79,8 @@
     <div v-if="selectedIds.length > 0" class="batch-action-bar">
       <span class="selected-text">已選擇 {{ selectedIds.length }} 筆項目</span>
       <div class="batch-buttons">
-        <button v-if="currentStatus !== 'REJECTED'" class="btn-batch reject" @click="batchReclassify(4)">批量排除 🗑️</button>
-        <button v-if="currentStatus !== 'OUTPUT'" class="btn-batch restore" @click="batchReclassify(2)">批量拉回 🌟</button>
+        <button v-if="currentStatus !== 'REJECTED'" class="btn-batch reject" @click="batchReclassify(6)">批量排除 🗑️</button>
+        <button v-if="currentStatus !== 'OUTPUT'" class="btn-batch restore" @click="batchReclassify(4)">批量拉回 🌟</button>
         <button class="btn-batch cancel" @click="selectedIds = []">取消選擇</button>
       </div>
     </div>

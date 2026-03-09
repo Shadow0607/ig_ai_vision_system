@@ -115,10 +115,12 @@ class AIConsumer:
 
     def process_task(self, task_json: str):
         task = json.loads(task_json)
-        profile = task.get("profile")
+        
+        # 🌟 1. 寬鬆接收各種 Payload 格式 (相容 S1 爬蟲、S5 飛輪與手動上傳)
+        profile = task.get("profile") or task.get("system_name")
         stage = task.get("stage")
         s3_uri = task.get('file_path')
-        media_id = task.get('task_id')
+        media_id = task.get('task_id') or task.get('media_id')
 
         # ==========================================
         # 🌟 嚴謹處理 1：冷啟動觸發的特徵庫批次重建
@@ -128,55 +130,79 @@ class AIConsumer:
             self.bank_manager.build_feature_bank(profile)
             return
 
-        if not s3_uri or not media_id:
-            logger.warning(f"⚠️ 任務資料不完整: {task}")
+        # ==========================================
+        # 🌟 智能補全：如果只收到 media_id，主動向 MySQL 查詢完整資訊
+        # ==========================================
+        if media_id and (not s3_uri or not profile):
+            conn = self.router._get_connection()
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT file_path, system_name FROM media_assets WHERE id = %s", (media_id,))
+                    res = cursor.fetchone()
+                    if res:
+                        s3_uri = s3_uri or res['file_path']
+                        profile = profile or res['system_name']
+                        logger.info(f"🔄 智能補全任務資訊: {profile} -> {s3_uri}")
+            except Exception as e:
+                logger.error(f"❌ 查詢完整資訊失敗: {e}")
+            finally:
+                conn.close()
+
+        # 防呆攔截：如果查完資料庫還是缺件，才捨棄任務
+        if not s3_uri or not media_id or not profile:
+            logger.warning(f"⚠️ 任務資料不完整或資料庫查無紀錄: {task}")
             return
 
         # 濾掉 s3:// 前綴
         bucket_prefix = f"s3://{self.router.bucket_name}/"
         s3_key = s3_uri.replace(bucket_prefix, "") if s3_uri.startswith(bucket_prefix) else s3_uri
+        
+        # ==========================================
+        # 🌟 核心修正：如果是影片，AI 必須讀取它的縮圖 (.jpg) 才能進行特徵提取
+        # ==========================================
+        ai_target_key = s3_key
+        if s3_key.lower().endswith(".mp4"):
+            ai_target_key = s3_key.rsplit('.', 1)[0] + ".jpg"
 
-        # 讀取實體檔案串流
-        stream = self.router.get_object_stream(s3_key)
+        # 讀取實體檔案串流 (改讀 ai_target_key)
+        stream = self.router.get_object_stream(ai_target_key)
         if not stream:
-            logger.warning(f"❌ S3 物件不存在: {s3_key}")
-            self.router.update_db_log(media_id, "ERROR_NOT_FOUND", False, 0.0)
+            logger.warning(f"❌ S3 影像不存在: {ai_target_key}")
+            # 🌟 修正：對齊資料庫現有的狀態碼 "ERROR"
+            self.router.update_db_log(media_id, "ERROR", False, 0.0)
             return
 
-        # 影像解碼
+        # 影像解碼 (現在保證一定是圖片的 Bytes)
         img_array = cv2.imdecode(np.frombuffer(stream.read(), np.uint8), cv2.IMREAD_COLOR)
         if img_array is None:
-            self.router.update_db_log(media_id, "ERROR_READ", False, 0.0)
+            logger.error(f"❌ OpenCV 解碼失敗: {ai_target_key}")
+            # 🌟 修正：對齊資料庫現有的狀態碼 "ERROR"
+            self.router.update_db_log(media_id, "ERROR", False, 0.0)
             return
 
         # ==========================================
         # 🌟 嚴謹處理 2：手動頭像上傳的「防呆與校驗」
         # ==========================================
         if stage == "MANUAL_UPLOAD":
-            logger.info(f"🛡️ [嚴謹校驗] 開始檢查手動上傳的基準圖: {s3_key}")
+            logger.info(f"🛡️ [嚴謹校驗] 開始檢查手動上傳的基準圖: {ai_target_key}")
             
             # 強制提取人臉特徵
             target_embedding, face_detected = self.extractor.extract_target_embedding(img_array)
             
             if not face_detected:
                 logger.error(f"❌ [嚴謹校驗失敗] 手動上傳的照片中找不到人臉！攔截寫入。")
-                # 1. 將錯誤狀態寫回資料庫，覆蓋掉 C# 盲目給的 HITL_CONFIRMED
                 self.router.update_db_log(media_id, "REJECTED_NO_FACE", False, 0.0)
-                # 2. 把不合格的檔案從 pos/ 移出，避免污染未來的模型
                 self.router.move_file_safe(s3_key, "GARBAGE")
                 return
             
-            # 若檢測成功，直接觸發該人物的特徵庫更新 (確保資料同步)
-            # 這裡為了避免併發重建，最佳做法是單點插入，但若你現有邏輯依賴 rebuild，可呼叫它
             logger.info(f"✅ [嚴謹校驗通過] 成功提取手動頭像特徵，寫入大腦！")
             self.bank_manager.build_feature_bank(profile)
             
-            # 確保資料庫留下完美的紀錄
             self.router.update_db_log(media_id, "HITL_CONFIRMED", True, 1.0)
             return
 
         # ==========================================
-        # 一般爬蟲照片的標準處理流程 (未命中 MANUAL_UPLOAD 的一般流程)
+        # 一般爬蟲照片的標準處理流程
         # ==========================================
         target_embedding, face_detected = self.extractor.extract_target_embedding(img_array)
         if not face_detected:

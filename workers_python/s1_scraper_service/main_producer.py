@@ -4,6 +4,7 @@ import time
 import random
 import logging
 import io  # 🌟 引入記憶體串流
+import json
 from pathlib import Path
 from dotenv import load_dotenv
 import redis
@@ -107,6 +108,13 @@ class S1Producer:
 
         try:
             profile = self.ig.get_profile(account)
+            account_type_row = self.db.get_account_type(account)
+            account_type_id = account_type_row[0] if account_type_row else 4
+            is_trusted = profile.is_verified or (account_type_id in [1, 2, 3])
+            if is_trusted:
+                logger.info(f"🔰 帳號信任驗證通過：將啟用直通車模式")
+            else:
+                logger.info(f"🛡️ 帳號未受信任：所有下載將進入 PENDING 隔離區")
 
             # --- Stories (限動) ---
             if profile.has_public_story:
@@ -121,7 +129,22 @@ class S1Producer:
 
                         results = self.process_media_pipeline(item, system_name, is_story=True)
                         for main_bytes, ai_bytes, fn, mt in results:
-                            self._save_and_dispatch_memory(system_name, account, fn, main_bytes, ai_bytes, mt, "STORY")
+                            # 🌟 核心智能分流：有藍勾勾 -> 直通車(DOWNLOADED)，沒有 -> 隔離(PENDING)
+                            target_status = "DOWNLOADED" if is_trusted else "PENDING"
+                            
+                            # 🌟 新增：依據狀態動態決定 S3 的存放資料夾
+                            target_folder = "official" if is_trusted else "quarantine"
+                            
+                            asset_data = {
+                                "source_type_id": self.db.status_manager.get_id("SOURCE_TYPE", "STORY"),
+                                "download_status_id": self.db.status_manager.get_id("DOWNLOAD_STATUS", target_status),
+                                "original_username": account,
+                                "original_shortcode": getattr(item, 'shortcode', str(item.mediaid)), # 防呆: 避免部分限動沒有 shortcode 屬性
+                                "source_is_verified": int(profile.is_verified)
+                            }
+                            
+                            # 👇 最後一個參數改為動態的 target_folder
+                            self._save_and_dispatch_memory(system_name, fn, main_bytes, ai_bytes, asset_data, target_folder)
 
             # --- Posts (貼文) ---
             logger.info("📄 檢查貼文...")
@@ -154,9 +177,24 @@ class S1Producer:
                 logger.info(f"⬇️ 開始下載與處理貼文: {post.shortcode} ...")
 
                 results = self.process_media_pipeline(post, system_name)
+                results = self.process_media_pipeline(post, system_name)
                 for main_bytes, ai_bytes, fn, mt in results:
-                    s_type = "REEL" if getattr(post, 'typename', '') == "GraphVideo" else "POST"
-                    self._save_and_dispatch_memory(system_name, account, fn, main_bytes, ai_bytes, mt, s_type)
+                    
+                    # 🌟 核心智能分流
+                    target_status = "DOWNLOADED" if is_trusted else "PENDING"
+                    target_folder = "official" if is_trusted else "quarantine"
+                    
+                    source_code = "REEL" if getattr(post, 'typename', '') == "GraphVideo" else "POST"
+                    asset_data = {
+                        "source_type_id": self.db.status_manager.get_id("SOURCE_TYPE", source_code),
+                        "download_status_id": self.db.status_manager.get_id("DOWNLOAD_STATUS", target_status),
+                        "original_username": account,
+                        "original_shortcode": post.shortcode,
+                        "source_is_verified": int(profile.is_verified)
+                    }
+                    
+                    # 👇 同樣使用動態的 target_folder
+                    self._save_and_dispatch_memory(system_name, fn, main_bytes, ai_bytes, asset_data, target_folder)
 
                 time.sleep(random.uniform(2, 5))
 
@@ -168,19 +206,16 @@ class S1Producer:
         except Exception as e:
             logger.error(f"❌ 帳號處理異常: {e}")
 
-    def _save_and_dispatch_memory(self, system_name, account, fn, main_bytes, ai_bytes, mt, s_type):
-        """🌟 核心：記憶體直傳 MinIO/S3，完全不產生本地檔案"""
-        s3_key_main = f"{system_name}/downloads/{fn}"
-        ai_fn = fn.replace(".mp4", ".jpg")
-        s3_key_ai = f"{system_name}/downloads/{ai_fn}"
-
+    def _save_and_dispatch_memory(self, system_name: str, fn: str, main_bytes: bytes, ai_bytes: bytes, asset_data: dict, target_folder: str = "official"):
+        # 1. 依據傳入的目標資料夾動態組裝 S3 路徑
+        s3_key_main = f"{system_name}/{target_folder}/{fn}"
         s3_uri_main = f"s3://{self.router.bucket_name}/{s3_key_main}"
-        s3_uri_ai = f"s3://{self.router.bucket_name}/{s3_key_ai}"
-
+        
         try:
-            # 1. 上傳主檔案 (影片或圖片)
-            # 🌟 修正：改用 Boto3 的嚴格關鍵字參數 (Bucket, Key, Body, ContentType)
-            content_type = "video/mp4" if mt == "VIDEO" else "image/jpeg"
+            # ==========================================
+            # ☁️ 第一階段：雲端無狀態直傳 (Cloud-Native Upload)
+            # ==========================================
+            content_type = "video/mp4" if fn.endswith(".mp4") else "image/jpeg"
             self.router.s3_client.put_object(
                 Bucket=self.router.bucket_name, 
                 Key=s3_key_main,
@@ -188,9 +223,9 @@ class S1Producer:
                 ContentType=content_type
             )
 
-            # 2. 如果是影片且有 AI 縮圖，額外上傳縮圖供後端快速掃描
             if ai_bytes and ai_bytes != main_bytes:
-                # 🌟 修正：改用 Boto3 語法
+                ai_fn = fn.replace(".mp4", ".jpg")
+                s3_key_ai = f"{system_name}/{target_folder}/{ai_fn}"
                 self.router.s3_client.put_object(
                     Bucket=self.router.bucket_name, 
                     Key=s3_key_ai,
@@ -198,28 +233,31 @@ class S1Producer:
                     ContentType="image/jpeg"
                 )
 
-            # 3. 寫入資料庫
-            media_id, is_zombie = self.db.insert_media_record(system_name, account, fn, s3_uri_main, mt, s_type)
+            asset_data["file_name"] = fn
+            asset_data["file_path"] = s3_key_main
+            asset_data["system_name"] = system_name
             
-            # 4. 推送 Redis 任務
-            if media_id is not None:
-                payload = {
-                    "task_id": media_id, 
-                    "profile": system_name, 
-                    "file_path": s3_uri_ai,
-                    "main_file_path": s3_uri_main, 
-                    "media_type": mt,
-                    "stage": "S1_STATLESS_UPLOADED"
-                }
-                self.redis.push_task(payload, is_priority=(mt == "IMAGE"))
-                # 🌟 補上這行：讓你知道任務成功丟給 S2 了
-                logger.info(f"🚀 成功推送任務至 S2 Queue: {fn}") 
+            # 呼叫我們上一階段重寫的防呆寫入方法
+            media_id = self.db.insert_media_asset(asset_data)
+            
+            if media_id:
+                # 🛡️ 防呆：絕對只允許狀態為 DOWNLOADED 的直通車檔案進入 AI 佇列
+                downloaded_id = self.db.status_manager.get_id("DOWNLOAD_STATUS", "DOWNLOADED")
+                if asset_data.get("download_status_id") == downloaded_id:
+                    
+                    payload = {"media_id": media_id}
+                    
+                    # 🌟 修正：使用自建的 RedisPublisher 進行安全推播
+                    self.redis.push_task(payload)
+                    
+                    logger.info(f"🚀 [放行] 成功推送任務至 S2 AI 大腦: {fn} (MediaID: {media_id})") 
+                else:
+                    logger.info(f"👀 [隔離] 檔案已存入緩衝區，等待前端人工審核: {fn}")
             else:
-                # 🌟 補上這行：讓你知道這張圖因為抓過所以被略過了
-                logger.info(f"♻️ DB 已有紀錄，略過 AI 辨識: {fn}")
+                logger.warning(f"♻️ DB 已有紀錄或寫入失敗，略過處理: {fn}")
 
         except Exception as e:
-            logger.error(f"⚠️ 雲端直傳失敗: {e}")
+            logger.error(f"⚠️ 雲端直傳與派發發生異常: {e}")
 
     def watchdog_orphaned_downloads(self, profiles):
         """[雲端改寫版] 掃描 S3 孤兒檔案並重新推進 Redis"""

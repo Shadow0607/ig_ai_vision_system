@@ -69,9 +69,17 @@ class S5StoryFeedbackManager:
 
     def _init_s3_client(self):
         """初始化 S3/MinIO 客戶端"""
+        endpoint = os.getenv('S3_ENDPOINT_URL')
+        
+        # 🌟 核心修正：自動偵測並補上 http:// (確保相容於 boto3)
+        if endpoint and not endpoint.startswith(('http://', 'https://')):
+            endpoint = f"http://{endpoint}"
+            
+        logger.info(f"🔗 正在連接 MinIO Endpoint: {endpoint}")
+
         self.s3_client = boto3.client(
             's3',
-            endpoint_url=os.getenv('S3_ENDPOINT_URL'),
+            endpoint_url=endpoint,  # 使用處理過的 endpoint
             aws_access_key_id=os.getenv('S3_ACCESS_KEY'),
             aws_secret_access_key=os.getenv('S3_SECRET_KEY'),
             region_name=os.getenv('S3_REGION', 'us-east-1')

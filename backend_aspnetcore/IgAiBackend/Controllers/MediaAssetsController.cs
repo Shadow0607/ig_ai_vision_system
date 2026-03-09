@@ -4,6 +4,8 @@ using IgAiBackend.Data;
 using Microsoft.AspNetCore.Authorization;
 using Minio;
 using Minio.DataModel.Args;
+using StackExchange.Redis;       // 🌟 新增：用於推播 AI 任務
+using System.Text.Json;          // 🌟 新增：用於序列化 JSON Payload
 
 namespace IgAiBackend.Controllers;
 
@@ -84,12 +86,14 @@ public class MediaAssetsController : ControllerBase
     }
 
     // ==========================================
-    // 2. 單筆分類更新 (拉回/排除)
+    // 2. 單筆分類更新 (拉回/排除) - 🌟 升級 AI 連動版
     // ==========================================
     [HttpPut("reclassify")]
-    public async Task<IActionResult> ReclassifyMedia([FromBody] ReclassifyRequestDto request, [FromServices] IMinioClient minioClient)
+    public async Task<IActionResult> ReclassifyMedia(
+        [FromBody] ReclassifyRequestDto request, 
+        [FromServices] IMinioClient minioClient,
+        [FromServices] IConnectionMultiplexer redis) // 🌟 注入 Redis
     {
-        // 🌟 1. 修正：直接用前端傳來的 ID 查詢系統狀態實體
         var targetStatus = await _context.SysStatuses.FindAsync(request.NewStatusId);
         if (targetStatus == null) return BadRequest(new { message = "無效的狀態 ID" });
 
@@ -103,23 +107,32 @@ public class MediaAssetsController : ControllerBase
         string sourceKey = log.MediaAsset.FilePath;
         string fileName = sourceKey.Split('/').Last();
 
-        // 🌟 2. 修正：透過查出來的 Code 決定資料夾走向
-        string targetFolder = targetStatus.Code == "OUTPUT" ? "OUTPUT" :
-                              targetStatus.Code == "REJECTED" ? "GARBAGE" : targetStatus.Code;
-
+        // 🌟 核心智能路由：拉回(OUTPUT)進 pos 當正樣本種子！排除(REJECTED)進 GARBAGE 當負樣本種子！
+        bool isOutput = targetStatus.Code == "OUTPUT";
+        string targetFolder = isOutput ? "pos" : (targetStatus.Code == "REJECTED" ? "GARBAGE" : targetStatus.Code);
         string targetKey = $"{systemName}/{targetFolder}/{fileName}";
 
         try
         {
             if (sourceKey != targetKey)
             {
+                // 1. 搬移主檔到特徵庫 (pos 或 GARBAGE)
                 await minioClient.CopyObjectAsync(new CopyObjectArgs()
                     .WithBucket(_bucketName).WithObject(targetKey)
                     .WithCopyObjectSource(new CopySourceObjectArgs().WithBucket(_bucketName).WithObject(sourceKey)));
-
                 await minioClient.RemoveObjectAsync(new RemoveObjectArgs()
                     .WithBucket(_bucketName).WithObject(sourceKey));
 
+                // 2. 如果是判定為本人 (pos)，額外複製一份到 OUTPUT 供前端展示頁面使用
+                if (isOutput)
+                {
+                    string outputKey = $"{systemName}/OUTPUT/{fileName}";
+                    await minioClient.CopyObjectAsync(new CopyObjectArgs()
+                        .WithBucket(_bucketName).WithObject(outputKey)
+                        .WithCopyObjectSource(new CopySourceObjectArgs().WithBucket(_bucketName).WithObject(targetKey)));
+                }
+
+                // 3. 處理影片的縮圖搬移
                 if (sourceKey.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase))
                 {
                     string thumbSrc = sourceKey.Replace(".mp4", ".jpg", StringComparison.OrdinalIgnoreCase);
@@ -128,18 +141,29 @@ public class MediaAssetsController : ControllerBase
                     await minioClient.CopyObjectAsync(new CopyObjectArgs()
                         .WithBucket(_bucketName).WithObject(thumbDest)
                         .WithCopyObjectSource(new CopySourceObjectArgs().WithBucket(_bucketName).WithObject(thumbSrc)));
-
                     await minioClient.RemoveObjectAsync(new RemoveObjectArgs()
                         .WithBucket(_bucketName).WithObject(thumbSrc));
+
+                    // 縮圖也同步到 OUTPUT 展示區
+                    if (isOutput)
+                    {
+                        string thumbOutput = $"{systemName}/OUTPUT/{fileName.Replace(".mp4", ".jpg", StringComparison.OrdinalIgnoreCase)}";
+                        await minioClient.CopyObjectAsync(new CopyObjectArgs()
+                            .WithBucket(_bucketName).WithObject(thumbOutput)
+                            .WithCopyObjectSource(new CopySourceObjectArgs().WithBucket(_bucketName).WithObject(thumbDest)));
+                    }
                 }
             }
 
-            // 🌟 3. 寫入新的 StatusId
+            // 4. 寫入新的路徑與狀態
             log.MediaAsset.FilePath = targetKey;
             log.StatusId = request.NewStatusId; 
             await _context.SaveChangesAsync();
 
-            return Ok(new { message = "分類更新成功" });
+            // 🌟 5. 發送指令叫 S2 AI 重建 Qdrant 特徵庫！
+            await TriggerFeatureBankRebuild(redis, systemName);
+
+            return Ok(new { message = "分類更新成功，AI 已將此影像納入學習樣本！" });
         }
         catch (Exception ex)
         {
@@ -148,15 +172,17 @@ public class MediaAssetsController : ControllerBase
     }
 
     // ==========================================
-    // 3. 批量分類更新 (拉回/排除)
+    // 3. 批量分類更新 (拉回/排除) - 🌟 升級 AI 連動版
     // ==========================================
     [HttpPut("batch-reclassify")]
-    public async Task<IActionResult> BatchReclassifyMedia([FromBody] BatchReclassifyRequestDto request, [FromServices] IMinioClient minioClient)
+    public async Task<IActionResult> BatchReclassifyMedia(
+        [FromBody] BatchReclassifyRequestDto request, 
+        [FromServices] IMinioClient minioClient,
+        [FromServices] IConnectionMultiplexer redis) // 🌟 注入 Redis
     {
         if (request.LogIds == null || !request.LogIds.Any())
             return BadRequest(new { message = "未提供任何 ID" });
 
-        // 🌟 1. 修正：直接用前端傳來的 ID 查詢系統狀態實體
         var targetStatus = await _context.SysStatuses.FindAsync(request.NewStatusId);
         if (targetStatus == null) return BadRequest(new { message = "無效的狀態 ID" });
 
@@ -165,9 +191,9 @@ public class MediaAssetsController : ControllerBase
             .Where(l => request.LogIds.Contains(l.Id))
             .ToListAsync();
 
-        // 🌟 2. 修正：透過查出來的 Code 決定資料夾走向
-        string targetFolder = targetStatus.Code == "OUTPUT" ? "OUTPUT" :
-                              targetStatus.Code == "REJECTED" ? "GARBAGE" : targetStatus.Code;
+        bool isOutput = targetStatus.Code == "OUTPUT";
+        string targetFolder = isOutput ? "pos" : (targetStatus.Code == "REJECTED" ? "GARBAGE" : targetStatus.Code);
+        var affectedProfiles = new HashSet<string>(); // 紀錄需要重建特徵庫的人物
 
         foreach (var log in logs)
         {
@@ -176,31 +202,36 @@ public class MediaAssetsController : ControllerBase
             string fileName = sourceKey.Split('/').Last();
             string targetKey = $"{systemName}/{targetFolder}/{fileName}";
 
-            if (sourceKey == targetKey) continue;
+            affectedProfiles.Add(systemName);
+
+            if (sourceKey == targetKey) 
+            {
+                log.StatusId = request.NewStatusId;
+                continue;
+            }
 
             try
             {
-                await minioClient.CopyObjectAsync(new CopyObjectArgs()
-                    .WithBucket(_bucketName).WithObject(targetKey)
-                    .WithCopyObjectSource(new CopySourceObjectArgs().WithBucket(_bucketName).WithObject(sourceKey)));
+                await minioClient.CopyObjectAsync(new CopyObjectArgs().WithBucket(_bucketName).WithObject(targetKey).WithCopyObjectSource(new CopySourceObjectArgs().WithBucket(_bucketName).WithObject(sourceKey)));
+                await minioClient.RemoveObjectAsync(new RemoveObjectArgs().WithBucket(_bucketName).WithObject(sourceKey));
 
-                await minioClient.RemoveObjectAsync(new RemoveObjectArgs()
-                    .WithBucket(_bucketName).WithObject(sourceKey));
+                if (isOutput) {
+                    await minioClient.CopyObjectAsync(new CopyObjectArgs().WithBucket(_bucketName).WithObject($"{systemName}/OUTPUT/{fileName}").WithCopyObjectSource(new CopySourceObjectArgs().WithBucket(_bucketName).WithObject(targetKey)));
+                }
 
                 if (sourceKey.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase))
                 {
                     string thumbSrc = sourceKey.Replace(".mp4", ".jpg", StringComparison.OrdinalIgnoreCase);
                     string thumbDest = targetKey.Replace(".mp4", ".jpg", StringComparison.OrdinalIgnoreCase);
 
-                    await minioClient.CopyObjectAsync(new CopyObjectArgs()
-                        .WithBucket(_bucketName).WithObject(thumbDest)
-                        .WithCopyObjectSource(new CopySourceObjectArgs().WithBucket(_bucketName).WithObject(thumbSrc)));
+                    await minioClient.CopyObjectAsync(new CopyObjectArgs().WithBucket(_bucketName).WithObject(thumbDest).WithCopyObjectSource(new CopySourceObjectArgs().WithBucket(_bucketName).WithObject(thumbSrc)));
+                    await minioClient.RemoveObjectAsync(new RemoveObjectArgs().WithBucket(_bucketName).WithObject(thumbSrc));
 
-                    await minioClient.RemoveObjectAsync(new RemoveObjectArgs()
-                        .WithBucket(_bucketName).WithObject(thumbSrc));
+                    if (isOutput) {
+                        await minioClient.CopyObjectAsync(new CopyObjectArgs().WithBucket(_bucketName).WithObject($"{systemName}/OUTPUT/{fileName.Replace(".mp4", ".jpg", StringComparison.OrdinalIgnoreCase)}").WithCopyObjectSource(new CopySourceObjectArgs().WithBucket(_bucketName).WithObject(thumbDest)));
+                    }
                 }
 
-                // 🌟 3. 寫入新的 StatusId
                 log.MediaAsset.FilePath = targetKey;
                 log.StatusId = request.NewStatusId; 
             }
@@ -211,7 +242,38 @@ public class MediaAssetsController : ControllerBase
         }
 
         await _context.SaveChangesAsync();
-        return Ok(new { message = $"成功更新 {logs.Count} 筆分類" });
+
+        // 🌟 批次發送重建指令
+        foreach (var profile in affectedProfiles)
+        {
+            await TriggerFeatureBankRebuild(redis, profile);
+        }
+
+        return Ok(new { message = $"成功更新 {logs.Count} 筆分類，並已觸發 AI 重新學習！" });
+    }
+
+    // ==========================================
+    // 🌟 4. 新增：喚醒 AI 進行特徵庫重建的輔助方法
+    // ==========================================
+    private async Task TriggerFeatureBankRebuild(IConnectionMultiplexer redis, string systemName)
+    {
+        try
+        {
+            var db = redis.GetDatabase();
+            var taskPayload = new
+            {
+                type = "BUILD_FEATURE_BANK",
+                profile = systemName,
+                timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+            };
+
+            // 🚀 推送到最高優先級佇列，讓 AI 工人立刻放下手邊工作去重建 Qdrant 向量庫
+            await db.ListLeftPushAsync("ig_processing_queue_high", JsonSerializer.Serialize(taskPayload));
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️ 推送 AI 重建任務失敗: {ex.Message}");
+        }
     }
 }
 

@@ -1,83 +1,117 @@
 <template>
-  <div class="page-container">
-    <div class="page-header">
-      <h2 class="section-title">🎯 人工覆核中心 <span class="sub-desc">處理 AI 邊緣特徵數據</span></h2>
+  <div class="hitl-dashboard-container">
+    
+    <!-- 🌟 保留原有的全螢幕預覽 Modal -->
+    <div v-if="fullViewImage" class="full-view-overlay" @click="closeFullView">
+      <img :src="fullViewImage" class="full-view-img" @click.stop />
+      <button class="close-btn" @click="closeFullView">✖</button>
     </div>
 
-    <div class="review-layout">
-      <div class="main-gallery">
-        <div class="gallery-header">
-          <div class="gallery-info">
-            <h3>待審核名單 ({{ pendingImages.length }})</h3>
-            <span class="selection-status">已勾選 <strong>{{ selectedIds.length }}</strong> 張</span>
+    <header class="dashboard-header">
+      <h2>🎯 終極人機協作中心 (Unified HITL)</h2>
+      <p>請選擇您要進行的審核任務：特徵庫批次訓練覆核，或轉發來源放行。</p>
+      
+      <!-- 雙軌任務頁籤切換 -->
+      <div class="tabs">
+        <button 
+          :class="['tab-btn', { active: activeTab === 'ai-review' }]" 
+          @click="activeTab = 'ai-review'">
+          🧠 AI 辨識覆核區 
+          <span class="badge-count" v-if="pendingImages.length">{{ pendingImages.length }}</span>
+        </button>
+        <button 
+          :class="['tab-btn', { active: activeTab === 'repost-review' }]" 
+          @click="activeTab = 'repost-review'">
+          🛡️ 未知轉發審核區 
+          <span class="badge-count" v-if="repostPendingList.length">{{ repostPendingList.length }}</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- ========================================================= -->
+    <!-- 頁籤 1：您原本的 AI 邊緣值覆核區 (支援批次選取與預覽) -->
+    <!-- ========================================================= -->
+    <div v-show="activeTab === 'ai-review'">
+      <div class="batch-actions" v-if="pendingImages.length > 0 && canReview">
+        <button class="btn btn-secondary" @click="selectAll">全選</button>
+        <button class="btn btn-secondary" @click="clearSelection">清除</button>
+        <button class="btn btn-keep batch-submit" @click="submitBatchApproval" :disabled="selectedIds.length === 0">
+          ✅ 批次通過 (共 {{ selectedIds.length }} 筆)
+        </button>
+      </div>
+
+      <div class="masonry-grid">
+        <div 
+          class="card ai-card" 
+          v-for="img in pendingImages" 
+          :key="'ai_'+img.id"
+          :class="{ selected: selectedIds.includes(img.id) }"
+          @click="toggleSelection(img.id)"
+        >
+          <div class="media-container">
+            <!-- 點擊圖片放大預覽，阻止事件冒泡避免觸發卡片選取 -->
+            <img :src="apiBaseUrl + img.fileUrl" loading="lazy" @click.stop="openFullView(apiBaseUrl + img.fileUrl)" />
+            
+            <!-- 依據分數動態給色 -->
+            <span class="badge" :style="{ backgroundColor: getScoreColor(img.confidenceScore) }">
+              {{ (img.confidenceScore * 100).toFixed(1) }}%
+            </span>
+            
+            <!-- 選取狀態打勾圖示 -->
+            <div class="check-overlay" v-if="selectedIds.includes(img.id)">✓</div>
           </div>
-          <div class="gallery-actions" v-if="myPerms.hasAction('UPDATE')">
-            <button class="btn-outline" @click="selectAll">本頁全選</button>
-            <button class="btn-outline" @click="clearSelection">取消選取</button>
+          
+          <div class="info-section">
+            <div class="source-info text-purple">{{ img.targetPersonSystemName }}</div>
           </div>
-        </div>
-
-        <div class="image-grid">
-          <div v-for="img in pendingImages" :key="img.id" class="img-card"
-            :class="{ 'selected': selectedIds.includes(img.id), 'readonly-mode': !myPerms.hasAction('UPDATE') }"
-            @click="myPerms.hasAction('UPDATE') ? toggleSelection(img.id) : null">
-
-            <div class="media-wrapper">
-              <template v-if="img.url.toLowerCase().endsWith('.mp4')">
-                <video :src="img.url" :poster="img.posterUrl" autoplay muted loop playsinline
-                  class="media-content"></video>
-                <div class="video-badge">▶ 影片</div>
-              </template>
-
-              <template v-else>
-                <img :src="img.url" loading="lazy" class="media-content" />
-              </template>
-
-              <button class="btn-trash" @click.stop="handleReject(img.id)" title="排除此樣本">🗑️</button>
-
-              <button class="btn-view-full" @click.stop="openFullView(img.url)" title="檢視原圖">🔍</button>
-
-              <div class="overlay">✔</div>
-            </div>
-
-            <div class="person-info">
-              <span class="person-name" :title="img.personName">👤 {{ img.personName }}</span>
-              <span class="status-badge" 
-                    v-if="img.statusName" 
-                    :style="{ backgroundColor: img.statusColor || '#777' }">
-                {{ img.statusName }}
-              </span>
-            </div>
-
-            <div class="score-container">
-              <div class="score-label">AI 相似度: {{ (img.score * 100).toFixed(1) }}%</div>
-              <div class="score-bar-bg">
-                <div class="score-bar-fill"
-                  :style="{ width: `${img.score * 100}%`, backgroundColor: getScoreColor(img.score) }">
-                </div>
-              </div>
-            </div>
-
+          
+          <div class="action-section" v-if="canReview">
+            <button class="btn btn-delete" @click.stop="handleReject(img.id)">
+              ❌ 排除 (非本人)
+            </button>
           </div>
-        </div>
-
-        <div class="gallery-footer">
-          <div class="hint">💡 提示：只勾選確認為本人的照片，系統將自動提取特徵並強化 AI 模型。</div>
-          <button class="btn-confirm" @click="submitBatchApproval" :disabled="selectedIds.length === 0">
-            確認疊加所選特徵 ({{ selectedIds.length }}) 🚀
-          </button>
         </div>
       </div>
+      <div class="empty-state" v-if="pendingImages.length === 0">🎉 目前沒有需要覆核的 AI 判定！</div>
     </div>
 
-    <div v-if="fullViewImage" class="full-view-overlay" @click.self="closeFullView">
-      <template v-if="fullViewImage.toLowerCase().endsWith('.mp4')">
-        <video :src="fullViewImage" controls autoplay muted loop playsinline class="full-view-content"></video>
-      </template>
-      <template v-else>
-        <img :src="fullViewImage" class="full-view-content" alt="Full view" />
-      </template>
-      <button class="btn-close-full" @click="closeFullView">×</button>
+    <!-- ========================================================= -->
+    <!-- 頁籤 2：我們新增的轉發與限動隔離審核區 (單筆決斷) -->
+    <!-- ========================================================= -->
+    <div v-show="activeTab === 'repost-review'">
+      <div class="masonry-grid">
+        <div class="card" v-for="item in repostPendingList" :key="'repost_'+item.id">
+          
+          <div class="media-container">
+            <span v-if="item.sourceTypeId === 31" class="badge badge-story">⏳ 限動 (已隔離)</span>
+            <span v-else class="badge badge-post">📌 貼文/短影音</span>
+            <!-- 若是 IG URL 直接顯示，若是 MinIO 內部路徑則可能需要接 API，這裡假設有完整 URL -->
+            <img :src="item.thumbnailUrl" loading="lazy" @click.stop="openFullView(item.thumbnailUrl)" />
+          </div>
+
+          <div class="info-section">
+            <div class="source-info">
+              <span class="username">{{ item.originalUsername }}</span>
+              <span v-if="item.sourceIsVerified" class="verified-badge" title="官方藍勾勾">☑️</span>
+            </div>
+            <div class="shortcode-info">
+              <small>{{ item.originalShortcode }}</small>
+              <small class="time">{{ formatDate(item.createdAt) }}</small>
+            </div>
+          </div>
+
+          <div class="action-section" v-if="canReview">
+            <button class="btn btn-keep" @click="decideRepost(item.id, 'KEEP')" :disabled="isProcessing === item.id">
+              ✅ 放行 (下載)
+            </button>
+            <button class="btn btn-delete" @click="decideRepost(item.id, 'DELETE')" :disabled="isProcessing === item.id">
+              🗑️ 捨棄
+            </button>
+          </div>
+
+        </div>
+      </div>
+      <div class="empty-state" v-if="repostPendingList.length === 0">🎉 目前沒有未知轉發需要審核！</div>
     </div>
 
   </div>

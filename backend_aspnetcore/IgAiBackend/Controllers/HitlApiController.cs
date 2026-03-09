@@ -39,50 +39,69 @@ public class HitlApiController : ControllerBase
     }
 
     [HttpGet("pending")]
-    public async Task<IActionResult> GetPendingHitl()
+public async Task<IActionResult> GetPendingHitl()
+{
+    if (!await PermissionHelper.HasPermissionAsync(_context, User, "HitlDashboard", "View", _redis))
+        return StatusCode(403, new { message = "🚫 您沒有查看覆核數據的權限。" });
+
+    try
     {
-        if (!await PermissionHelper.HasPermissionAsync(_context, User, "HitlDashboard", "View", _redis))
-            return StatusCode(403, new { message = "🚫 您沒有查看覆核數據的權限。" });
+        // 🌟 步驟 1：只從資料庫撈取純資料，不做任何字串插值或 Replace (避免 EF Core 翻譯報錯)
+        var rawData = await _context.AiAnalysisLogs
+            .Include(a => a.MediaAsset)
+            .ThenInclude(m => m.Person)
+            .Include(a => a.Status)
+            .Where(a => a.Status!.Code == "PENDING")
+            .Select(a => new
+            {
+                Id = a.Id,
+                MediaId = a.MediaId,
+                PersonName = a.MediaAsset != null && a.MediaAsset.Person != null
+                             ? (a.MediaAsset.Person.DisplayName ?? a.MediaAsset.Person.SystemName)
+                             : "Unknown",
+                SystemName = a.MediaAsset != null && a.MediaAsset.Person != null
+                             ? a.MediaAsset.Person.SystemName
+                             : "Unknown",
+                Score = a.ConfidenceScore,
+                FilePath = a.MediaAsset != null ? a.MediaAsset.FilePath : "", // 💡 這裡只抓純文字路徑
+                StatusName = a.Status!.DisplayName,
+                StatusColor = a.Status!.UiColor
+            })
+            .ToListAsync(); // 💡 觸發 SQL 執行，將資料拉回 C# 記憶體
 
-        try
+        // 🌟 步驟 2：資料已經在記憶體中了，我們現在可以安全地使用 C# 進行字串拼接與防呆
+        var pending = rawData.Select(a => new
         {
-            var pending = await _context.AiAnalysisLogs
-                .Include(a => a.MediaAsset)
-                .ThenInclude(m => m.Person)
-                .Include(a => a.Status) // 🌟 必須 Include Status 才能讀取字典屬性
-                .Where(a => a.Status!.Code == "PENDING")
-                .Select(a => new
-                {
-                    Id = a.Id,
-                    MediaId = a.MediaId,
-                    PersonName = a.MediaAsset != null && a.MediaAsset.Person != null
-                                 ? (a.MediaAsset.Person.DisplayName ?? a.MediaAsset.Person.SystemName)
-                                 : "Unknown",
-                    SystemName = a.MediaAsset != null && a.MediaAsset.Person != null
-                                 ? a.MediaAsset.Person.SystemName
-                                 : "Unknown",
-                    Score = a.ConfidenceScore,
-                    Url = a.MediaAsset != null ? $"http://{_minioEndpoint}/{_bucketName}/{a.MediaAsset.FilePath}" : "",
-                    PosterUrl = a.MediaAsset != null
-                                ? (a.MediaAsset.FilePath.EndsWith(".mp4")
-                                    ? $"http://{_minioEndpoint}/{_bucketName}/{a.MediaAsset.FilePath.Replace(".mp4", ".jpg")}"
-                                    : $"http://{_minioEndpoint}/{_bucketName}/{a.MediaAsset.FilePath}")
-                                : "",
-                                
-                    // 🌟 架構師優化：一併帶回狀態的顯示名稱與顏色
-                    StatusName = a.Status!.DisplayName,
-                    StatusColor = a.Status!.UiColor
-                })
-                .ToListAsync();
+            Id = a.Id,
+            MediaId = a.MediaId,
+            PersonName = a.PersonName,
+            SystemName = a.SystemName,
+            Score = a.Score,
+            
+            // 加入 !string.IsNullOrEmpty 保護，避免 FilePath 為空時引爆錯誤
+            Url = !string.IsNullOrEmpty(a.FilePath) 
+                  ? $"http://{_minioEndpoint}/{_bucketName}/{a.FilePath}" 
+                  : "",
+                  
+            PosterUrl = !string.IsNullOrEmpty(a.FilePath)
+                        ? (a.FilePath.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase)
+                            ? $"http://{_minioEndpoint}/{_bucketName}/{a.FilePath.Replace(".mp4", ".jpg", StringComparison.OrdinalIgnoreCase)}"
+                            : $"http://{_minioEndpoint}/{_bucketName}/{a.FilePath}")
+                        : "",
+                        
+            StatusName = a.StatusName,
+            StatusColor = a.StatusColor
+        });
 
-            return Ok(pending);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[Hitl Api Error] {ex.Message}");
-            return StatusCode(500, new { message = "資料庫查詢錯誤，請查看後端 Log。" });
-        }
+        return Ok(pending);
     }
+    catch (Exception ex)
+    {
+        // 把 ToString() 印出來，萬一還有錯可以看清楚是哪一行
+        Console.WriteLine($"\n[Hitl Api 嚴重錯誤] \n{ex.ToString()}\n");
+        return StatusCode(500, new { message = "資料庫查詢錯誤，請查看後端 Log。" });
+    }
+}
     [HttpPost("approve")]
     [Authorize] 
     public async Task<IActionResult> ApproveHitl([FromBody] HitlApproveDto dto)
