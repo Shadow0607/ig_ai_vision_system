@@ -4,12 +4,13 @@ using IgAiBackend.Data;
 using Microsoft.AspNetCore.Authorization;
 using Minio;
 using Minio.DataModel.Args;
-using StackExchange.Redis;       
-using System.Text.Json;          
+using StackExchange.Redis;
+using System.Text.Json;
 using System;
 using System.Threading.Tasks;
 using IgAiBackend.Models;
 using Microsoft.Extensions.Options;
+using IgAiBackend.Helpers;
 namespace IgAiBackend.Controllers;
 
 [ApiController]
@@ -21,59 +22,30 @@ public class MediaAssetsController : ControllerBase
     private readonly IMinioClient _minioClient;
     private readonly string _bucketName = "ig-ai-assets";
 
-    public MediaAssetsController(ApplicationDbContext context, IMinioClient minioClient,IOptions<MinioSettings> minioSettings)
+    private readonly ILogger<ConfigController> _logger;
+
+    public MediaAssetsController(ApplicationDbContext context, IMinioClient minioClient, IOptions<MinioSettings> minioSettings, ILogger<ConfigController> logger)
     {
         _context = context;
         _minioClient = minioClient;
         _bucketName = minioSettings.Value.BucketName;
+        _logger = logger;
     }
     [HttpGet("{mediaId}/stream")]
     public async Task<IActionResult> GetMediaStreamUrl(long mediaId)
     {
-        try
-        {
-            // 1. 極速查詢資料庫，確認檔案存在 (使用 AsNoTracking 提升效能)
-            var media = await _context.MediaAssets
-                .AsNoTracking()
-                .FirstOrDefaultAsync(m => m.Id == mediaId);
+        var media = await _context.MediaAssets.AsNoTracking().FirstOrDefaultAsync(m => m.Id == mediaId);
+        if (media == null) return NotFound();
 
-            if (media == null)
-            {
-                return NotFound(new { message = "找不到指定的媒體資產。" });
-            }
+        // 🌟 產生 1 小時有效的臨時安全連結
+        var presignedArgs = new PresignedGetObjectArgs()
+            .WithBucket(_bucketName)
+            .WithObject(media.FilePath)
+            .WithExpiry(3600);
 
-            if (string.IsNullOrEmpty(media.FilePath))
-            {
-                return BadRequest(new { message = "該媒體的實體檔案路徑異常。" });
-            }
+        string streamUrl = await _minioClient.PresignedGetObjectAsync(presignedArgs);
 
-            // 2. 建立 MinIO 預先簽名物件請求參數 (時效設定為 3600 秒 = 1 小時)
-            var presignedArgs = new PresignedGetObjectArgs()
-                .WithBucket(_bucketName)
-                .WithObject(media.FilePath) // 這裡的 FilePath 必須是 S3 的 Object Key (例如: "dlwlrma/video123.mp4")
-                .WithExpiry(3600);
-
-            // 3. 呼叫 NAS 產生時效性安全連結
-            string streamUrl = await _minioClient.PresignedGetObjectAsync(presignedArgs);
-
-            // 4. 回傳給前端
-            return Ok(new 
-            { 
-                mediaId = media.Id,
-                streamUrl = streamUrl,
-                expiresIn = 3600
-            });
-        }
-        catch (Minio.Exceptions.MinioException e)
-        {
-            // 攔截 NAS 連線異常
-            return StatusCode(500, new { message = $"NAS 儲存服務連線異常: {e.Message}" });
-        }
-        catch (Exception ex)
-        {
-            // 攔截其他系統異常
-            return StatusCode(500, new { message = $"產生串流連結失敗: {ex.Message}" });
-        }
+        return Ok(new { streamUrl = streamUrl }); // 🚀 僅回傳網址，不轉發流量
     }
 
     // ==========================================
@@ -88,7 +60,7 @@ public class MediaAssetsController : ControllerBase
     {
         var query = _context.AiAnalysisLogs
             .Include(l => l.MediaAsset)
-            .Include(l => l.Status) 
+            .Include(l => l.Status)
             .AsQueryable();
 
         // 過濾邏輯保持不變
@@ -287,31 +259,49 @@ public class MediaAssetsController : ControllerBase
     // 3. 批量分類更新 (拉回/排除) - 🌟 升級 AI 連動版
     // ==========================================
     [HttpPut("batch-reclassify")]
+    [Authorize]
     public async Task<IActionResult> BatchReclassifyMedia(
-        [FromBody] BatchReclassifyRequestDto request,
-        [FromServices] IMinioClient minioClient,
-        [FromServices] IConnectionMultiplexer redis) // 🌟 注入 Redis
+    [FromBody] BatchReclassifyRequestDto request,
+    [FromServices] IConnectionMultiplexer redis) // 🌟 統一使用建構子注入的 _minioClient
     {
+        // ==========================================
+        // 🛡️ 1. 權限與資安雙重門禁
+        // ==========================================
+        // 第一道：功能面權限檢查 (對齊 PermissionHelper)
+        if (!await PermissionHelper.HasPermissionAsync(_context, User, "HitlDashboard", "Update", redis))
+            return StatusCode(403, new { message = "🚫 您不具備批量重分類的操作權限。" });
+
+        // 第二道：角色面越權防護 (IDOR) - 訪客嚴禁變更 AI 特徵庫
+        var roleClaim = User.FindFirst("RoleId")?.Value;
+        if (!int.TryParse(roleClaim, out int roleId) || roleId == 3)
+            return StatusCode(403, new { message = "🚫 嚴重越權：Guest 訪客帳號禁止變更特徵標籤。" });
+
         if (request.LogIds == null || !request.LogIds.Any())
-            return BadRequest(new { message = "未提供任何 ID" });
+            return BadRequest(new { message = "未提供待處理的 ID 清單。" });
 
         var targetStatus = await _context.SysStatuses.FindAsync(request.NewStatusId);
-        if (targetStatus == null) return BadRequest(new { message = "無效的狀態 ID" });
+        if (targetStatus == null) return BadRequest(new { message = "無效的狀態 ID。" });
 
+        // ==========================================
+        // 🌟 2. 資料查詢 (加入 AsNoTracking 提升大量讀取效能)
+        // ==========================================
         var logs = await _context.AiAnalysisLogs
             .Include(l => l.MediaAsset)
             .Where(l => request.LogIds.Contains(l.Id))
             .ToListAsync();
 
+        if (!logs.Any()) return NotFound(new { message = "找不到符合條件的紀錄。" });
+
         bool isOutput = targetStatus.Code == "OUTPUT";
         string targetFolder = isOutput ? "pos" : (targetStatus.Code == "REJECTED" ? "GARBAGE" : targetStatus.Code);
-        var affectedProfiles = new HashSet<string>(); // 紀錄需要重建特徵庫的人物
+        var affectedProfiles = new HashSet<string>();
+        string currentUser = User.Identity?.Name ?? "SystemAdmin";
 
         foreach (var log in logs)
         {
             string systemName = log.MediaAsset.SystemName;
             string sourceKey = log.MediaAsset.FilePath;
-            string fileName = sourceKey.Split('/').Last();
+            string fileName = Path.GetFileName(sourceKey);
             string targetKey = $"{systemName}/{targetFolder}/{fileName}";
 
             affectedProfiles.Add(systemName);
@@ -324,57 +314,64 @@ public class MediaAssetsController : ControllerBase
 
             try
             {
-                await minioClient.CopyObjectAsync(new CopyObjectArgs().WithBucket(_bucketName).WithObject(targetKey).WithCopyObjectSource(new CopySourceObjectArgs().WithBucket(_bucketName).WithObject(sourceKey)));
-                await minioClient.RemoveObjectAsync(new RemoveObjectArgs().WithBucket(_bucketName).WithObject(sourceKey));
+                // 🌟 3. 使用輔助方法處理 S3 搬移 (讓主邏輯乾淨，易於維護)
+                await S3MoveWithThumbnailAsync(sourceKey, targetKey, isOutput, systemName, fileName);
 
-                if (isOutput)
-                {
-                    await minioClient.CopyObjectAsync(new CopyObjectArgs().WithBucket(_bucketName).WithObject($"{systemName}/OUTPUT/{fileName}").WithCopyObjectSource(new CopySourceObjectArgs().WithBucket(_bucketName).WithObject(targetKey)));
-                }
-
-                if (sourceKey.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase))
-                {
-                    string thumbSrc = sourceKey.Replace(".mp4", ".jpg", StringComparison.OrdinalIgnoreCase);
-                    string thumbDest = targetKey.Replace(".mp4", ".jpg", StringComparison.OrdinalIgnoreCase);
-
-                    await minioClient.CopyObjectAsync(new CopyObjectArgs().WithBucket(_bucketName).WithObject(thumbDest).WithCopyObjectSource(new CopySourceObjectArgs().WithBucket(_bucketName).WithObject(thumbSrc)));
-                    await minioClient.RemoveObjectAsync(new RemoveObjectArgs().WithBucket(_bucketName).WithObject(thumbSrc));
-
-                    if (isOutput)
-                    {
-                        await minioClient.CopyObjectAsync(new CopyObjectArgs().WithBucket(_bucketName).WithObject($"{systemName}/OUTPUT/{fileName.Replace(".mp4", ".jpg", StringComparison.OrdinalIgnoreCase)}").WithCopyObjectSource(new CopySourceObjectArgs().WithBucket(_bucketName).WithObject(thumbDest)));
-                    }
-                }
-                string currentUser = User.Identity?.Name ?? "System";
-
+                // 🌟 4. 更新資料庫狀態 (保留您已有的審核人邏輯)
                 log.MediaAsset.FilePath = targetKey;
                 log.StatusId = request.NewStatusId;
-                if (targetStatus.Code == "OUTPUT")
-                {
-                    log.ConfidenceScore = 1.0f;
-                    log.ReviewedBy = currentUser; // 👈 寫入審核員
-                }
-                else if (targetStatus.Code == "REJECTED" || targetStatus.Code == "GARBAGE" || targetStatus.Code == "SKIP")
-                {
-                    log.ConfidenceScore = 0.0f;
-                    log.ReviewedBy = currentUser; // 👈 寫入審核員
-                }
+                log.ReviewedBy = currentUser; // 👈 確實寫入審核員
+                log.ConfidenceScore = isOutput ? 1.0f : 0.0f;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[Batch Move Error] ID: {log.Id}, {ex.Message}");
+                _logger.LogError($"[Batch Reclassify Error] ID: {log.Id}, {ex.Message}");
             }
         }
 
         await _context.SaveChangesAsync();
 
-        // 🌟 批次發送重建指令
+        // 🌟 5. 觸發 AI 重建 (資料飛輪)
         foreach (var profile in affectedProfiles)
         {
             await TriggerFeatureBankRebuild(redis, profile);
         }
 
-        return Ok(new { message = $"成功更新 {logs.Count} 筆分類，並已觸發 AI 重新學習！" });
+        return Ok(new { message = $"✅ 成功批次更新 {logs.Count} 筆分類，並已觸發 AI 重新學習。" });
+    }
+
+    // --- 💡 建議新增的私有輔助方法，解決單筆/批次共用的代碼重工問題 ---
+
+    private async Task S3MoveWithThumbnailAsync(string src, string dest, bool isOutput, string sysName, string fileName)
+    {
+        // 搬移主檔
+        await S3CopyAndRemoveAsync(src, dest);
+
+        // 如果是輸出本人，額外複製一份到 OUTPUT 展示區
+        if (isOutput) await S3CopyOnlyAsync(dest, $"{sysName}/OUTPUT/{fileName}");
+
+        // 處理影片縮圖
+        if (src.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase))
+        {
+            string tSrc = src.Replace(".mp4", ".jpg", StringComparison.OrdinalIgnoreCase);
+            string tDest = dest.Replace(".mp4", ".jpg", StringComparison.OrdinalIgnoreCase);
+
+            await S3CopyAndRemoveAsync(tSrc, tDest);
+            if (isOutput) await S3CopyOnlyAsync(tDest, $"{sysName}/OUTPUT/{Path.GetFileName(tDest)}");
+        }
+    }
+
+    private async Task S3CopyAndRemoveAsync(string src, string dest)
+    {
+        await _minioClient.CopyObjectAsync(new CopyObjectArgs().WithBucket(_bucketName).WithObject(dest)
+            .WithCopyObjectSource(new CopySourceObjectArgs().WithBucket(_bucketName).WithObject(src)));
+        await _minioClient.RemoveObjectAsync(new RemoveObjectArgs().WithBucket(_bucketName).WithObject(src));
+    }
+
+    private async Task S3CopyOnlyAsync(string src, string dest)
+    {
+        await _minioClient.CopyObjectAsync(new CopyObjectArgs().WithBucket(_bucketName).WithObject(dest)
+            .WithCopyObjectSource(new CopySourceObjectArgs().WithBucket(_bucketName).WithObject(src)));
     }
 
     // ==========================================
@@ -401,6 +398,7 @@ public class MediaAssetsController : ControllerBase
         }
     }
 }
+
 
 // ==========================================
 // 🌟 乾淨的 DTO 區塊 (全數改用整數 ID)

@@ -18,40 +18,30 @@ public static class FileValidationHelper
     public static bool IsValid(List<IFormFile> files, out string errorMessage)
     {
         errorMessage = string.Empty;
-
-        if (files == null || !files.Any())
-        {
-            errorMessage = "未選擇任何檔案。";
-            return false;
-        }
-
         foreach (var file in files)
         {
-            if (file.Length == 0) continue;
+            if (file.Length < 8) continue; // 檔案太小，無法判定特徵
 
-            // 1. 檢查檔案大小
-            if (file.Length > MaxFileSize)
+            using (var stream = file.OpenReadStream())
+            using (var reader = new BinaryReader(stream))
             {
-                errorMessage = $"檔案「{file.FileName}」超過 10MB 限制。";
-                return false;
-            }
+                // 讀取前 8 個 bytes
+                byte[] header = reader.ReadBytes(8);
 
-            // 2. 檢查副檔名
-            var ext = Path.GetExtension(file.FileName).ToLower();
-            if (!AllowedExtensions.Contains(ext))
-            {
-                errorMessage = $"檔案「{file.FileName}」格式不符。僅支援 JPG, PNG, MP4。";
-                return false;
-            }
+                // 🌟 JPEG 特徵碼: FF D8 FF
+                bool isJpg = header[0] == 0xFF && header[1] == 0xD8 && header[2] == 0xFF;
+                // 🌟 PNG 特徵碼: 89 50 4E 47
+                bool isPng = header[0] == 0x89 && header[1] == 0x50 && header[2] == 0x4E && header[3] == 0x47;
+                // 🌟 MP4 特徵碼: 包含 "ftyp" (66 74 79 70) 於 offset 4
+                bool isMp4 = header[4] == 0x66 && header[5] == 0x74 && header[6] == 0x79 && header[7] == 0x70;
 
-            // 3. 檢查 MIME Type (防止偽裝副檔名的惡意檔案)
-            if (!AllowedMimeTypes.Contains(file.ContentType))
-            {
-                errorMessage = $"檔案「{file.FileName}」的內容類型無效。";
-                return false;
+                if (!isJpg && !isPng && !isMp4)
+                {
+                    errorMessage = $"檔案「{file.FileName}」內容特徵與副檔名不符，疑似惡意檔案。";
+                    return false;
+                }
             }
         }
-
         return true;
     }
 }

@@ -193,9 +193,10 @@ public class HitlApiController : ControllerBase
     public async Task<IActionResult> BatchApprove([FromBody] HitlBatchDto dto)
     {
         if (!await PermissionHelper.HasPermissionAsync(_context, User, "HitlDashboard", "Update", _redis))
-        {
-            return StatusCode(403, new { message = "🚫 您的帳號權限不足，無法執行批次覆核。" });
-        }
+        return StatusCode(403, new { message = "🚫 您的帳號權限不足。" });
+        
+        var roleId = GetCurrentRoleId();
+        if (roleId == 3) return Forbid();
 
         if (dto.Ids == null || !dto.Ids.Any())
             return BadRequest(new { message = "未提供任何要處理的 ID" });

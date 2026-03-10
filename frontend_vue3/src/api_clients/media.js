@@ -1,8 +1,8 @@
 // src/api_clients/media.js
-import api from './api.js'; // 必須引入原本寫好的 api.js
+import api from './api.js';
 
 export const getMediaStream = async (mediaId) => {
-  // 使用 api.apiClient 以確保發送時有帶 Token
   const response = await api.apiClient.get(`/MediaAssets/${mediaId}/stream`); 
-  return response.data; 
+  // 🌟 直接回傳物件中的 streamUrl 供前端 <video> 使用
+  return response.data.streamUrl; 
 };

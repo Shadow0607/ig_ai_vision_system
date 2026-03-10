@@ -83,12 +83,14 @@ services:
       - ai_net
 
   # === Ethereum 區塊鏈私有節點 ===
+  # === Ethereum 區塊鏈私有節點 (資安強化版) ===
   ethereum-node:
     image: ethereum/client-go:latest
     container_name: ai_vision_private_chain
     restart: always
     ports:
-      - "8545:8545"
+      # 🌟 修正 1：將連接埠僅綁定於本機 127.0.0.1，防止外部公網直接存取 8545
+      - "127.0.0.1:8545:8545"
     volumes:
       - eth_data:/root/.ethereum
     networks:
@@ -97,10 +99,13 @@ services:
       - --dev
       - --dev.period=2
       - --http
+      # 🌟 修正 2：內部監聽仍維持 0.0.0.0 以利 Docker 網路通信，但透過 ports 限制外部存取
       - --http.addr=0.0.0.0
       - --http.api=eth,web3,net,personal
-      - --http.corsdomain="*"
-      - --http.vhosts="*"
+      # 🌟 修正 3：嚴格限制 CORS 來源，僅允許您的 Vue 3 前端開發環境存取
+      - --http.corsdomain=http://localhost:5173
+      # 🌟 修正 4：嚴格限制 VHosts 虛擬主機，僅允許 localhost
+      - --http.vhosts=localhost
 
 volumes:
   mysql_data:
