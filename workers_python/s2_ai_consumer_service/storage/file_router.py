@@ -70,10 +70,9 @@ class FileAndDBRouter:
             return False
 
     def move_file_safe(self, src_key: str, dest_folder: str) -> str:
-        """[給 S2 AI 使用] 在 S3 內搬移物件 (其實是 Copy + Delete)"""
+        """[權責分離版] 僅在 S3 內進行複製，不執行物理刪除"""
         if not src_key: return None
         try:
-            # 解析檔名並組合新路徑 (例如: yoona__lim/downloads/1.jpg -> yoona__lim/pos/1.jpg)
             filename = os.path.basename(src_key)
             system_name = src_key.split('/')[0] if '/' in src_key else "unknown"
             new_key = f"{system_name}/{dest_folder}/{filename}"
@@ -81,16 +80,17 @@ class FileAndDBRouter:
             if src_key == new_key:
                 return new_key
 
-            # 1. 複製到新位置
+            # 🌟 1. 僅執行複製到新位置 (例如：從 downloads 到 GARBAGE)
             copy_source = {'Bucket': self.bucket_name, 'Key': src_key}
             self.s3_client.copy_object(Bucket=self.bucket_name, CopySource=copy_source, Key=new_key)
             
-            # 2. 刪除舊位置
-            self.s3_client.delete_object(Bucket=self.bucket_name, Key=src_key)
+            # 🌟 2. 移除 self.s3_client.delete_object(Bucket=self.bucket_name, Key=src_key)
+            # 原有的刪除動作現在交給 C# OrphanFileSweeperService 統一處理
+            logger.info(f"🚚 檔案已複製至標記目錄: {new_key} (等待 C# 清理舊檔)")
             
-            return new_key # 回傳新的 S3 鍵值存入資料庫
+            return new_key
         except Exception as e:
-            logger.error(f"❌ S3 搬移失敗 ({src_key} -> {dest_folder}): {e}")
+            logger.error(f"❌ S3 複製失敗 ({src_key} -> {dest_folder}): {e}")
             return None
 
     # ================= 🗄️ 資料庫操作 (邏輯不變，僅路徑概念轉為 Object Key) =================

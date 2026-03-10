@@ -35,91 +35,58 @@ namespace IgAiBackend.Services
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken) 
         {
-            _logger.LogInformation("🛡️ NAS 死信與孤兒檔案清理排程已啟動 (動態狀態尋址模式)。");
+            _logger.LogInformation("🛡️ NAS 檔案清理機啟動 (包含 GARBAGE 物理清理模式)。");
 
             while (!stoppingToken.IsCancellationRequested) 
             {
                 try 
                 {
-                    // 1. 建立獨立的生命週期 Scope，避免 BackgroundService 導致 Memory Leak
                     using (var scope = _serviceProvider.CreateScope()) 
                     {
                         var dbContext = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
                         
-                        // ========================================================
-                        // 🌟 核心優化：動態取得 Status ID，徹底消滅 Magic Numbers
-                        // ========================================================
-                        var pendingStatus = await dbContext.SysStatuses
-                            .AsNoTracking()
-                            .FirstOrDefaultAsync(s => s.Category == "DOWNLOAD_STATUS" && s.Code == "PENDING", stoppingToken);
+                        // 🌟 1. 取得需要物理清理的狀態碼 (GARBAGE 與 REJECTED)
+                        var garbageStatuses = await dbContext.SysStatuses
+                            .Where(s => s.Category == "AI_RECOGNITION" && (s.Code == "GARBAGE" || s.Code == "REJECTED"))
+                            .Select(s => s.Id)
+                            .ToListAsync(stoppingToken);
 
-                        var errorStatus = await dbContext.SysStatuses
-                            .AsNoTracking()
-                            .FirstOrDefaultAsync(s => s.Category == "DOWNLOAD_STATUS" && s.Code == "ERROR", stoppingToken);
+                        // 🌟 2. 取得超時 PENDING 狀態
+                        var pendingStatusId = (await dbContext.SysStatuses
+                            .FirstOrDefaultAsync(s => s.Category == "DOWNLOAD_STATUS" && s.Code == "PENDING", stoppingToken))?.Id;
 
-                        if (pendingStatus == null || errorStatus == null)
+                        // 🌟 3. 執行物理檔案清理迴圈
+                        var cleanupTargets = await dbContext.MediaAssets
+                            .Where(m => (garbageStatuses.Contains(m.DownloadStatusId)) || 
+                                        (m.DownloadStatusId == pendingStatusId && m.CreatedAt < DateTime.UtcNow.AddDays(-1)))
+                            .Take(200) // 批次處理
+                            .ToListAsync(stoppingToken);
+
+                        foreach (var target in cleanupTargets) 
                         {
-                            _logger.LogWarning("⚠️ 系統狀態庫 (sys_statuses) 尚未初始化 PENDING 或 ERROR 狀態，本次清理略過。");
-                            await Task.Delay(TimeSpan.FromHours(1), stoppingToken);
-                            continue;
-                        }
-
-                        // 2. 尋找超過 24 小時仍卡在 PENDING 的無效任務
-                        var deadThreshold = DateTime.UtcNow.AddDays(-1);
-                        bool hasMoreTasks = true;
-
-                        // 🌟 加入迴圈：只要還有死信任務，就繼續每批 100 筆往下清
-                        while (hasMoreTasks && !stoppingToken.IsCancellationRequested)
-                        {
-                            var deadTasks = await dbContext.MediaAssets
-                                .Where(m => m.DownloadStatusId == pendingStatus.Id && m.CreatedAt < deadThreshold)
-                                .Take(100) // 每次處理 100 筆，防止記憶體崩潰
-                                .ToListAsync(stoppingToken);
-
-                            if (!deadTasks.Any())
+                            if (!string.IsNullOrWhiteSpace(target.FilePath)) 
                             {
-                                hasMoreTasks = false; // 沒資料了，結束迴圈準備去睡 12 小時
-                                continue;
-                            }
-
-                            foreach (var task in deadTasks) 
-                            {
-                                _logger.LogWarning($"🧹 偵測到死信任務 (MediaID: {task.Id})，準備清理...");
-                                
-                                // 3. NAS 實體防呆刪除
-                                if (!string.IsNullOrWhiteSpace(task.FilePath)) 
-                                {
-                                    try
-                                    {
-                                        var removeArgs = new RemoveObjectArgs()
-                                            .WithBucket(_bucketName)
-                                            .WithObject(task.FilePath);
-                                        await _minioClient.RemoveObjectAsync(removeArgs, stoppingToken);
-                                        _logger.LogInformation($"🗑️ 已從 NAS 刪除殘留檔案: {task.FilePath}");
-                                    }
-                                    catch (Exception minioEx)
-                                    {
-                                        _logger.LogError($"NAS 刪除失敗 ({task.FilePath}): {minioEx.Message}");
-                                    }
+                                try {
+                                    await _minioClient.RemoveObjectAsync(new RemoveObjectArgs()
+                                        .WithBucket(_bucketName).WithObject(target.FilePath), stoppingToken);
+                                    _logger.LogInformation($"🗑️ 物理清理成功: {target.FilePath}");
+                                    
+                                    // 🌟 4. 清理完畢後，將路徑清空防止重複處理，並視需要更新狀態
+                                    target.FilePath = string.Empty; 
                                 }
-
-                                // 4. 動態寫入 Error ID，封印任務
-                                task.DownloadStatusId = errorStatus.Id; 
+                                catch (Exception ex) {
+                                    _logger.LogError($"物理清理失敗 ({target.FilePath}): {ex.Message}");
+                                }
                             }
-
-                            // 存檔並紀錄
-                            await dbContext.SaveChangesAsync(stoppingToken);
-                            _logger.LogInformation($"✅ 本批次已成功清理 {deadTasks.Count} 筆死信任務。");
                         }
+                        await dbContext.SaveChangesAsync(stoppingToken);
                     }
                 }
-                catch (Exception ex) 
-                {
-                    _logger.LogError($"清理排程發生嚴重異常: {ex.Message}");
+                catch (Exception ex) {
+                    _logger.LogError($"清理排程異常: {ex.Message}");
                 }
 
-                // 休眠 12 小時 (等待下一次掃描)
-                await Task.Delay(TimeSpan.FromHours(12), stoppingToken);
+                await Task.Delay(TimeSpan.FromHours(12), stoppingToken); // 定期執行
             }
         }
     }

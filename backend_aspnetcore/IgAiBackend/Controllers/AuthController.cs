@@ -57,6 +57,7 @@ public class AuthController : ControllerBase
         // 2. 快取未命中，執行資料庫查詢與 LINQ 分群
         // 2. 快取未命中，執行資料庫查詢與 LINQ 分群
         var permissionsQuery = await _context.RolePermissions
+            .AsNoTracking()
             .Include(rp => rp.SystemRoute)
             .Include(rp => rp.Action)
             .Where(rp => rp.RoleId == roleId)
@@ -292,7 +293,8 @@ public class AuthController : ControllerBase
 
             // 🌟 權限變更後，主動清除該角色的 Redis 快取，強制下次讀取最新 DB 資料
             try { await _redis.GetDatabase().KeyDeleteAsync($"ig_ai:perms:role:{roleId}"); } catch { }
-
+            var cacheKey = $"ig_ai:api_perms_hash:role:{roleId}";
+            await _redis.GetDatabase().KeyDeleteAsync(cacheKey);
             return Ok(new { message = "權限更新成功" });
         }
         catch (Exception ex)
