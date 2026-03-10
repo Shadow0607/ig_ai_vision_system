@@ -200,8 +200,20 @@ public class ColdStartController : ControllerBase
                     if (syncToOutput) await S3CopyOnly(thumbDest, $"{systemName}/OUTPUT/{thumbDest.Split('/').Last()}");
                 }
             }
+            string currentUser = User.Identity?.Name ?? "System";
+            // 🌟 寫入新的路徑與狀態
             log.MediaAsset.FilePath = targetKey;
-            log.StatusId = newStatusId; // 🌟 寫入新的 StatusId
+            log.StatusId = newStatusId; 
+
+            // 🌟 視覺強迫症專屬：人工確認拉回直接滿分，排除則歸零
+            if (targetFolder == "pos" || targetFolder == "OUTPUT") {
+                log.ConfidenceScore = 1.0f;
+                log.ReviewedBy = currentUser;
+            } else if (targetFolder == "GARBAGE") {
+                log.ConfidenceScore = 0.0f;
+                log.ReviewedBy = currentUser;
+            }
+
             return true;
         }
         catch (Exception ex) { Console.WriteLine($"❌ [S3 Move] 失敗: {ex.Message}"); return false; }
@@ -345,6 +357,7 @@ public class ColdStartController : ControllerBase
                     MediaId = mediaAsset.Id,
                     StatusId = targetStatusId, 
                     ConfidenceScore = 1.0f, 
+                    ReviewedBy = User.Identity?.Name ?? "System", // 👈 可以順手補上這行
                     ProcessedAt = DateTime.UtcNow
                 };
                 _context.AiAnalysisLogs.Add(log);

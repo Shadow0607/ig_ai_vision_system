@@ -27,7 +27,8 @@ class FileAndDBRouter:
         # 確保 endpoint 包含 http:// (boto3 必填)
         endpoint_url = f"http://{s3_endpoint}" if not s3_endpoint.startswith('http') else s3_endpoint
         
-        self.bucket_name = os.getenv('S3_BUCKET_NAME', 'ig-ai-assets')
+        # 🌟 將原本的 S3_BUCKET_NAME 統一改為 MINIO_BUCKET_NAME
+        self.bucket_name = os.getenv('MINIO_BUCKET_NAME', 'ig-ai-assets')
         
         # 建立 boto3 連線實體
         self.s3_client = boto3.client(

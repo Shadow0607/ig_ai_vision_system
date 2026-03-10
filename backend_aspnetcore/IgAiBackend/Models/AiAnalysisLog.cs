@@ -28,6 +28,8 @@ public class AiAnalysisLog
 
     [Column("processed_at")]
     public DateTime ProcessedAt { get; set; } = DateTime.Now;
+    [Column("reviewed_by")]
+    public string? ReviewedBy { get; set; }
 
     [ForeignKey("MediaId")]
     public MediaAsset MediaAsset { get; set; } = null!;

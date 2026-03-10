@@ -63,4 +63,9 @@ public class MediaAsset
 
     [ForeignKey("AccountId")]
     public SocialAccount? Account { get; set; }
+
+    [Column("ig_media_id")]
+    public string? IgMediaId { get; set; }
+    [Column("s5_checked")]
+    public bool S5Checked { get; set; } = false;
 }

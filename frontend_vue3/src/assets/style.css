@@ -1,4 +1,6 @@
-/* --- 全域變數 --- */
+/* src/assets/style.css */
+
+/* --- 1. 全域變數 (Variables) --- */
 :root {
   --bg-dark: #0f1115;
   --bg-card: rgba(255, 255, 255, 0.03);
@@ -6,37 +8,44 @@
   --secondary: #00f2fe;
   --accent: #764ba2;
   --danger: #ff4d4f;
-  --text: #e0e0e0;
-  --border: rgba(255, 255, 255, 0.1);
+  --text-main: #e0e0e0;
+  
+  /* 統一邊框與漸層變數 */
+  --border-color: rgba(255, 255, 255, 0.1);
+  --primary-gradient: linear-gradient(135deg, var(--primary), var(--secondary));
 }
 
-/* --- 通用佈局 --- */
+/* --- 2. 通用佈局 (Layouts) --- */
 .page-container {
-  padding: 20px;
-  color: var(--text);
+  padding: 2rem;
+  max-width: 1400px;
+  margin: 0 auto;
+  color: var(--text-main);
 }
 
 .section-title {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 24px;
-  font-size: 1.5rem;
+  margin-bottom: 2rem;
+  font-size: 1.8rem;
+  color: #fff;
 }
 
-/* --- 科技感卡片 (所有頁面共用) --- */
+/* --- 3. 網格與卡片系統 (Grid & Cards) --- */
 .card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 20px;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 1.5rem;
 }
 
+/* 🌟 統一整併 .common-card 與 .data-card 為單一組件 */
 .data-card {
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: 12px;
   overflow: hidden;
-  transition: transform 0.3s ease, border-color 0.3s ease;
+  transition: transform 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
 }
 
 .data-card:hover {
@@ -45,33 +54,46 @@
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
 }
 
-/* --- 通用按鈕 --- */
-.btn {
-  border: none;
-  padding: 10px 16px;
-  border-radius: 6px;
-  cursor: pointer;
-  font-weight: 600;
-  transition: filter 0.2s;
+.card-img {
+  width: 100%;
+  height: 200px;
+  object-fit: cover;
+  display: block;
 }
 
-.btn-primary { background: linear-gradient(135deg, var(--primary), var(--secondary)); color: white; }
-.btn-accent { background: linear-gradient(135deg, #667eea, var(--accent)); color: white; }
-.btn-outline { background: transparent; border: 1px solid var(--danger); color: var(--danger); }
+/* --- 4. 按鈕系統 (Buttons) --- */
+.btn {
+  border: none;
+  padding: 10px 20px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 600;
+  transition: filter 0.2s, opacity 0.2s;
+}
 
-.btn:hover { filter: brightness(1.2); }
+.btn:hover {
+  filter: brightness(1.2);
+  opacity: 0.9;
+}
 
-/* src/assets/style.css 必備地基 */
-.page-container { padding: 2rem; max-width: 1400px; margin: 0 auto; }
-.section-title { font-size: 1.8rem; margin-bottom: 2rem; color: #fff; display: flex; align-items: center; gap: 10px; }
+/* 🌟 統一按鈕色彩配置 */
+.btn-primary {
+  background: var(--primary-gradient);
+  color: white;
+}
 
-/* 網格系統 */
-.card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1.5rem; }
+.btn-accent {
+  background: linear-gradient(135deg, #667eea, var(--accent));
+  color: white;
+}
 
-/* 佈局輔助 (修正你 template 裡的 flex/gap) */
+.btn-outline {
+  background: transparent;
+  border: 1px solid var(--danger);
+  color: var(--danger);
+}
+
+/* --- 5. 佈局輔助 (Utility Classes) --- */
 .flex { display: flex; }
 .gap-2 { gap: 0.5rem; }
 .p-4 { padding: 1rem; }
-
-/* 圖片處理 */
-.card-img { width: 100%; height: 200px; object-fit: cover; display: block; }

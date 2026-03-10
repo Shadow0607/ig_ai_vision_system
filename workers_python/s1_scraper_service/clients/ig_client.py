@@ -226,6 +226,23 @@ class IGClient:
             return db_repo.status_manager.get_id("SOURCE_TYPE", "POST")
         else:
             return db_repo.status_manager.get_id("SOURCE_TYPE", "STORY")
+    def get_original_author(self, post, is_story=False) -> str:
+        """🌟 提取轉發貼文/限動的『真正原作者』"""
+        try:
+            node = getattr(post, '_node', {})
+            if is_story:
+                # 情況 A: 轉發別人的限時動態 (就是你截圖的狀況)
+                if 'reshared_story_media_author' in node:
+                    return node['reshared_story_media_author'].get('username')
+                
+                # 情況 B: 將別人的「一般貼文」分享到自己的限時動態
+                if 'story_feed_media' in node and len(node['story_feed_media']) > 0:
+                    return node['story_feed_media'][0].get('media', {}).get('user', {}).get('username')
+            
+            # 如果不是轉發，就回傳發布者本人
+            return getattr(post, 'owner_username', None)
+        except Exception:
+            return None
 
     def process_post(self, post, target_person_id, db_repo, minio_client):
         """處理單一 IG 貼文/限動的四軌動態路由"""
@@ -246,10 +263,11 @@ class IGClient:
             return
 
         # 🔍 決策節點 1：信任度驗證 (Identity & Dynamic Trust)
-        account_type_id = db_repo.get_account_type(original_username)
+        # 🌟 修正點：直接接收整數，不需要 [0] or 4 了！
+        account_type_id = db_repo.get_account_type(original_username, 'ig') 
         is_ig_verified = post.owner_profile.is_verified # Instaloader 擷取藍勾勾狀態
         
-        # 🌟 修正 Bug：[6-9] 在 Python 會變成 [-3]，改回正確的白名單陣列 [1, 2, 3] (本帳, 官方, 小帳)
+        # 🌟 修正 Bug：改回正確的白名單陣列 [1, 2, 3] (本帳, 官方, 小帳)
         is_trusted_express = (account_type_id in [1, 2, 3]) or is_ig_verified
 
         if is_trusted_express:
@@ -287,7 +305,7 @@ class IGClient:
             # ==========================================
             logger.info(f"👀 [進入緩衝區] 普通轉發 [{shortcode}] (來源: {original_username})")
             
-            if source_type_id == story_type_id: # 🌟 動態 ID 取代原本的 31
+            if source_type_id == story_type_id: 
                 # 🚨 軌道 C: STORY 限動 (有 24H 時效性，先下載實體檔並隔離)
                 media_bytes = self.download_media_to_memory(post)
                 file_name = f"quarantine_{shortcode}.mp4" if post.is_video else f"quarantine_{shortcode}.jpg"

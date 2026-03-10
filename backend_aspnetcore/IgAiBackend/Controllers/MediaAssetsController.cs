@@ -4,23 +4,76 @@ using IgAiBackend.Data;
 using Microsoft.AspNetCore.Authorization;
 using Minio;
 using Minio.DataModel.Args;
-using StackExchange.Redis;       // 🌟 新增：用於推播 AI 任務
-using System.Text.Json;          // 🌟 新增：用於序列化 JSON Payload
-
+using StackExchange.Redis;       
+using System.Text.Json;          
+using System;
+using System.Threading.Tasks;
+using IgAiBackend.Models;
+using Microsoft.Extensions.Options;
 namespace IgAiBackend.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
-[Authorize]
+[Authorize] // 確保必須登入才能取得媒體
 public class MediaAssetsController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
-    private readonly string _minioEndpoint = "localhost:9000"; // 應從 Config 讀取
+    private readonly IMinioClient _minioClient;
     private readonly string _bucketName = "ig-ai-assets";
 
-    public MediaAssetsController(ApplicationDbContext context)
+    public MediaAssetsController(ApplicationDbContext context, IMinioClient minioClient,IOptions<MinioSettings> minioSettings)
     {
         _context = context;
+        _minioClient = minioClient;
+        _bucketName = minioSettings.Value.BucketName;
+    }
+    [HttpGet("{mediaId}/stream")]
+    public async Task<IActionResult> GetMediaStreamUrl(long mediaId)
+    {
+        try
+        {
+            // 1. 極速查詢資料庫，確認檔案存在 (使用 AsNoTracking 提升效能)
+            var media = await _context.MediaAssets
+                .AsNoTracking()
+                .FirstOrDefaultAsync(m => m.Id == mediaId);
+
+            if (media == null)
+            {
+                return NotFound(new { message = "找不到指定的媒體資產。" });
+            }
+
+            if (string.IsNullOrEmpty(media.FilePath))
+            {
+                return BadRequest(new { message = "該媒體的實體檔案路徑異常。" });
+            }
+
+            // 2. 建立 MinIO 預先簽名物件請求參數 (時效設定為 3600 秒 = 1 小時)
+            var presignedArgs = new PresignedGetObjectArgs()
+                .WithBucket(_bucketName)
+                .WithObject(media.FilePath) // 這裡的 FilePath 必須是 S3 的 Object Key (例如: "dlwlrma/video123.mp4")
+                .WithExpiry(3600);
+
+            // 3. 呼叫 NAS 產生時效性安全連結
+            string streamUrl = await _minioClient.PresignedGetObjectAsync(presignedArgs);
+
+            // 4. 回傳給前端
+            return Ok(new 
+            { 
+                mediaId = media.Id,
+                streamUrl = streamUrl,
+                expiresIn = 3600
+            });
+        }
+        catch (Minio.Exceptions.MinioException e)
+        {
+            // 攔截 NAS 連線異常
+            return StatusCode(500, new { message = $"NAS 儲存服務連線異常: {e.Message}" });
+        }
+        catch (Exception ex)
+        {
+            // 攔截其他系統異常
+            return StatusCode(500, new { message = $"產生串流連結失敗: {ex.Message}" });
+        }
     }
 
     // ==========================================
@@ -28,22 +81,27 @@ public class MediaAssetsController : ControllerBase
     // ==========================================
     [HttpGet("classified")]
     public async Task<IActionResult> GetClassifiedMedia(
-        [FromQuery] string status = "OUTPUT", 
+        [FromQuery] string status = "OUTPUT",
         [FromQuery] string? systemName = null,
-        [FromQuery] int page = 1,         
-        [FromQuery] int pageSize = 50)    
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 50)
     {
         var query = _context.AiAnalysisLogs
             .Include(l => l.MediaAsset)
-            .Include(l => l.Status) // 🌟 必須 Include Status，才能讀取到 Code
+            .Include(l => l.Status) 
             .AsQueryable();
 
-        // 🌟 修正：利用 Status!.Code 進行字串判斷
-        if (status == "REJECTED") {
+        // 過濾邏輯保持不變
+        if (status == "REJECTED")
+        {
             query = query.Where(l => l.Status!.Code == "REJECTED" || l.Status!.Code == "GARBAGE" || l.Status!.Code == "SKIP");
-        } else if (status == "ALL") {
-            query = query.Where(l => l.Status!.Code != "DOWNLOADED"); // ALL 的情況
-        } else {
+        }
+        else if (status == "ALL")
+        {
+            query = query.Where(l => l.Status!.Code != "DOWNLOADED");
+        }
+        else
+        {
             query = query.Where(l => l.Status!.Code == status);
         }
 
@@ -55,7 +113,8 @@ public class MediaAssetsController : ControllerBase
         int totalItems = await query.CountAsync();
         int totalPages = (int)Math.Ceiling(totalItems / (double)pageSize);
 
-        var items = await query
+        // 🌟 步驟一：只從資料庫撈取所需的「純資料」 (包含 FilePath)
+        var rawItems = await query
             .OrderByDescending(l => l.ProcessedAt)
             .Skip((page - 1) * pageSize)
             .Take(pageSize)
@@ -64,24 +123,66 @@ public class MediaAssetsController : ControllerBase
                 l.Id,
                 l.ConfidenceScore,
                 l.ProcessedAt,
-                RecognitionStatus = l.Status!.Code, // 保留 Code 讓前端寫邏輯判斷 (如顯示/隱藏按鈕)
-                
-                // 🌟 架構師優化：直接將動態字典餵給前端，解放前端 Hardcode
-                StatusName = l.Status!.DisplayName,
-                StatusColor = l.Status!.UiColor,    
-
+                RecognitionStatus = l.Status!.Code,
+                StatusDisplayName = l.Status!.DisplayName,
+                StatusUiColor = l.Status!.UiColor,
+                ReviewedBy = l.ReviewedBy,
                 SystemName = l.MediaAsset.SystemName,
                 FileName = l.MediaAsset.FileName,
-                Url = $"http://{_minioEndpoint}/{_bucketName}/{l.MediaAsset.FilePath}"
+                OriginalUsername = l.MediaAsset.OriginalUsername,
+                FilePath = l.MediaAsset.FilePath // 👈 必須撈出實體路徑以供後續加密
             })
             .ToListAsync();
 
-        return Ok(new 
-        { 
-            Items = items, 
-            TotalItems = totalItems, 
-            TotalPages = totalPages, 
-            CurrentPage = page 
+        // 🌟 步驟二：在記憶體中批次產生時效性安全連結
+        var items = new List<object>();
+        foreach (var l in rawItems)
+        {
+            string secureStreamUrl = "";
+            try
+            {
+                if (!string.IsNullOrEmpty(l.FilePath))
+                {
+                    // 呼叫 NAS 產生時效為 3600 秒 (1小時) 的加密連結
+                    var presignedArgs = new PresignedGetObjectArgs()
+                        .WithBucket(_bucketName)
+                        .WithObject(l.FilePath)
+                        .WithExpiry(3600);
+                    secureStreamUrl = await _minioClient.PresignedGetObjectAsync(presignedArgs);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[安全連結產生失敗] {l.FilePath}: {ex.Message}");
+            }
+
+            // 判斷人工狀態
+            bool isManualOutput = l.RecognitionStatus == "OUTPUT" && (l.ConfidenceScore >= 1.0f || l.ReviewedBy != null);
+            bool isManualReject = (l.RecognitionStatus == "REJECTED" || l.RecognitionStatus == "GARBAGE" || l.RecognitionStatus == "SKIP") && (l.ConfidenceScore <= 0.0f || l.ReviewedBy != null);
+
+            // 組合最終回傳物件
+            items.Add(new
+            {
+                l.Id,
+                l.ConfidenceScore,
+                l.ProcessedAt,
+                l.RecognitionStatus,
+                StatusName = isManualOutput ? "👋 人工判定" : isManualReject ? "👋 人工排除" : l.StatusDisplayName,
+                StatusColor = isManualOutput ? "#10b981" : isManualReject ? "#ef4444" : l.StatusUiColor,
+                l.ReviewedBy,
+                l.SystemName,
+                l.FileName,
+                l.OriginalUsername,
+                Url = secureStreamUrl // 🌟 這裡直接把加密好的 S3 連結傳給前端！
+            });
+        }
+
+        return Ok(new
+        {
+            Items = items,
+            TotalItems = totalItems,
+            TotalPages = totalPages,
+            CurrentPage = page
         });
     }
 
@@ -90,7 +191,7 @@ public class MediaAssetsController : ControllerBase
     // ==========================================
     [HttpPut("reclassify")]
     public async Task<IActionResult> ReclassifyMedia(
-        [FromBody] ReclassifyRequestDto request, 
+        [FromBody] ReclassifyRequestDto request,
         [FromServices] IMinioClient minioClient,
         [FromServices] IConnectionMultiplexer redis) // 🌟 注入 Redis
     {
@@ -154,10 +255,21 @@ public class MediaAssetsController : ControllerBase
                     }
                 }
             }
+            string currentUser = User.Identity?.Name ?? "System";
 
             // 4. 寫入新的路徑與狀態
             log.MediaAsset.FilePath = targetKey;
-            log.StatusId = request.NewStatusId; 
+            log.StatusId = request.NewStatusId;
+            if (targetStatus.Code == "OUTPUT")
+            {
+                log.ConfidenceScore = 1.0f;
+                log.ReviewedBy = currentUser; // 👈 寫入審核員
+            }
+            else if (targetStatus.Code == "REJECTED" || targetStatus.Code == "GARBAGE" || targetStatus.Code == "SKIP")
+            {
+                log.ConfidenceScore = 0.0f;
+                log.ReviewedBy = currentUser; // 👈 寫入審核員
+            }
             await _context.SaveChangesAsync();
 
             // 🌟 5. 發送指令叫 S2 AI 重建 Qdrant 特徵庫！
@@ -176,7 +288,7 @@ public class MediaAssetsController : ControllerBase
     // ==========================================
     [HttpPut("batch-reclassify")]
     public async Task<IActionResult> BatchReclassifyMedia(
-        [FromBody] BatchReclassifyRequestDto request, 
+        [FromBody] BatchReclassifyRequestDto request,
         [FromServices] IMinioClient minioClient,
         [FromServices] IConnectionMultiplexer redis) // 🌟 注入 Redis
     {
@@ -204,7 +316,7 @@ public class MediaAssetsController : ControllerBase
 
             affectedProfiles.Add(systemName);
 
-            if (sourceKey == targetKey) 
+            if (sourceKey == targetKey)
             {
                 log.StatusId = request.NewStatusId;
                 continue;
@@ -215,7 +327,8 @@ public class MediaAssetsController : ControllerBase
                 await minioClient.CopyObjectAsync(new CopyObjectArgs().WithBucket(_bucketName).WithObject(targetKey).WithCopyObjectSource(new CopySourceObjectArgs().WithBucket(_bucketName).WithObject(sourceKey)));
                 await minioClient.RemoveObjectAsync(new RemoveObjectArgs().WithBucket(_bucketName).WithObject(sourceKey));
 
-                if (isOutput) {
+                if (isOutput)
+                {
                     await minioClient.CopyObjectAsync(new CopyObjectArgs().WithBucket(_bucketName).WithObject($"{systemName}/OUTPUT/{fileName}").WithCopyObjectSource(new CopySourceObjectArgs().WithBucket(_bucketName).WithObject(targetKey)));
                 }
 
@@ -227,13 +340,25 @@ public class MediaAssetsController : ControllerBase
                     await minioClient.CopyObjectAsync(new CopyObjectArgs().WithBucket(_bucketName).WithObject(thumbDest).WithCopyObjectSource(new CopySourceObjectArgs().WithBucket(_bucketName).WithObject(thumbSrc)));
                     await minioClient.RemoveObjectAsync(new RemoveObjectArgs().WithBucket(_bucketName).WithObject(thumbSrc));
 
-                    if (isOutput) {
+                    if (isOutput)
+                    {
                         await minioClient.CopyObjectAsync(new CopyObjectArgs().WithBucket(_bucketName).WithObject($"{systemName}/OUTPUT/{fileName.Replace(".mp4", ".jpg", StringComparison.OrdinalIgnoreCase)}").WithCopyObjectSource(new CopySourceObjectArgs().WithBucket(_bucketName).WithObject(thumbDest)));
                     }
                 }
+                string currentUser = User.Identity?.Name ?? "System";
 
                 log.MediaAsset.FilePath = targetKey;
-                log.StatusId = request.NewStatusId; 
+                log.StatusId = request.NewStatusId;
+                if (targetStatus.Code == "OUTPUT")
+                {
+                    log.ConfidenceScore = 1.0f;
+                    log.ReviewedBy = currentUser; // 👈 寫入審核員
+                }
+                else if (targetStatus.Code == "REJECTED" || targetStatus.Code == "GARBAGE" || targetStatus.Code == "SKIP")
+                {
+                    log.ConfidenceScore = 0.0f;
+                    log.ReviewedBy = currentUser; // 👈 寫入審核員
+                }
             }
             catch (Exception ex)
             {
@@ -288,6 +413,6 @@ public class ReclassifyRequestDto
 
 public class BatchReclassifyRequestDto
 {
-    public List<long> LogIds { get; set; } = new List<long>(); 
+    public List<long> LogIds { get; set; } = new List<long>();
     public int NewStatusId { get; set; } // 從 string NewStatus 改為 int ID
 }

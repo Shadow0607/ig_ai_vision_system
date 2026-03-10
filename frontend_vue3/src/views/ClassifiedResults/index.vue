@@ -1,5 +1,6 @@
 <template>
   <div class="classified-container">
+    
     <header class="page-header">
       <div class="header-left">
         <h2>🖼️ AI 分類結果檢視</h2>
@@ -30,34 +31,46 @@
 
     <div v-else class="image-grid" :class="{ 'has-bottom-bar': selectedIds.length > 0 }">
       <div v-for="item in mediaList" :key="item.id" class="media-card" :class="{ 'is-selected': selectedIds.includes(item.id) }">
+        
         <div class="img-wrapper" @click="toggleSelection(item.id)">
-          <template v-if="item.url.toLowerCase().endsWith('.mp4')">
-            <video :src="item.url" autoplay muted loop playsinline class="media-fit"></video>
-          </template>
-          <template v-else>
-            <img :src="item.url" loading="lazy" class="media-fit" />
-          </template>
+          <SafeMediaDisplay 
+            :streamUrl="item.url" 
+            :fileName="item.fileName || item.FileName"
+            class="media-fit"
+          />
+          
           <input type="checkbox" class="card-checkbox" :checked="selectedIds.includes(item.id)" />
+          
           <div class="score-badge" :class="getScoreClass(item.confidenceScore)">
             {{ (item.confidenceScore * 100).toFixed(1) }}%
           </div>
+
           <div class="card-actions">
-            <button class="action-btn view" @click.stop="openFullView(item.url)" title="檢視原圖">🔍</button>
+            <button class="action-btn view" @click.stop="openFullView(item)" title="檢視原圖">🔍</button>
             <button v-if="currentStatus !== 'REJECTED'" class="action-btn reject" @click.stop="reclassify(item, 6)" title="標示為錯誤並排除">🗑️</button>
             <button v-if="currentStatus !== 'OUTPUT'" class="action-btn restore" @click.stop="reclassify(item, 4)" title="拉回並確認為本人">🌟</button>
           </div>
         </div>
+        
         <div class="media-info">
-          <div class="tag-group" style="display: flex; gap: 6px; margin-bottom: 4px;">
-            <span 
-              class="dynamic-status-badge" 
-              :style="{ backgroundColor: item.statusColor || '#6c757d' }"
-            >
+          <div class="tag-group">
+            <span class="dynamic-status-badge" :style="{ backgroundColor: item.statusColor || '#6c757d' }">
               {{ item.statusName || item.recognitionStatus }}
             </span>
-            <span class="system-tag">{{ item.systemName }}</span>
+            <span class="system-tag">{{ item.systemName || item.SystemName }}</span>
           </div>
+          
           <p class="file-date">{{ formatDate(item.processedAt) }}</p>
+          
+          <div class="special-badges">
+            <span v-if="(item.originalUsername || item.OriginalUsername) && (item.originalUsername || item.OriginalUsername) !== (item.systemName || item.SystemName)" class="repost-badge">
+                🔁 轉發自: @{{ item.originalUsername || item.OriginalUsername }}
+            </span>
+            <span v-if="item.reviewedBy || item.ReviewedBy" class="reviewer-badge">
+                👨‍💻 審核員: {{ item.reviewedBy || item.ReviewedBy }}
+            </span>
+          </div>
+          <span class="file-name">{{ item.fileName || item.FileName }}</span>
         </div>
       </div>
     </div>
@@ -74,8 +87,6 @@
       </select>
     </div>
 
-    <div v-if="!loading && mediaList.length === 0" class="empty-state">此分類目前沒有照片。</div>
-
     <div v-if="selectedIds.length > 0" class="batch-action-bar">
       <span class="selected-text">已選擇 {{ selectedIds.length }} 筆項目</span>
       <div class="batch-buttons">
@@ -85,15 +96,16 @@
       </div>
     </div>
 
-    <div v-if="fullViewImage" class="full-view-overlay" @click.self="closeFullView">
-      <template v-if="fullViewImage.toLowerCase().endsWith('.mp4')">
-        <video ref="videoPlayer" :key="fullViewImage" :src="fullViewImage" controls autoplay muted loop playsinline class="full-view-content"></video>
-      </template>
-      <template v-else>
-        <img :src="fullViewImage" class="full-view-content" />
-      </template>
+    <div v-if="fullViewItem" class="full-view-overlay" @click.self="closeFullView">
+      <SafeMediaDisplay 
+        :streamUrl="fullViewItem.url" 
+        :fileName="fullViewItem.fileName || fullViewItem.FileName"
+        class="full-view-content"
+      />
+      <button class="close-btn" @click="closeFullView">❌ 關閉</button>
     </div>
   </div>
 </template>
+
 <script src="./script.js"></script>
 <style src="./style.css" scoped></style>

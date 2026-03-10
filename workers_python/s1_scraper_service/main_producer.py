@@ -3,44 +3,29 @@ import sys
 import time
 import random
 import logging
-import io  # 🌟 引入記憶體串流
-import json
+import shutil
 from pathlib import Path
-from dotenv import load_dotenv
 import redis
-script_dir = Path(__file__).resolve().parent
-workers_path = str(script_dir.parent)       # 🌟 指向 workers_python 目錄
-root_path = str(script_dir.parent.parent)   # 指向 ig_ai_vision_system 根目錄
+workers_dir = str(Path(__file__).resolve().parent.parent)
+if workers_dir not in sys.path:
+    sys.path.insert(0, workers_dir)
+from shared.config_loader import setup_project_env
+ROOT_DIR = setup_project_env()
 
-# 將 workers_python 加入搜尋路徑 (解決 from shared 找不到的問題)
-if workers_path not in sys.path:
-    sys.path.insert(0, workers_path)
-
-# 將根目錄加入搜尋路徑 (解決 from workers_python.s2_ai_consumer_service... 找不到的問題)
-if root_path not in sys.path:
-    sys.path.insert(0, root_path)
-# 匯入原始模組 (請確保路徑正確)
 from clients.ig_client import IGClient
+from clients.yt_client import YTClient 
 from clients.redis_publisher import RedisPublisher
 from state_management.db_repository import DBRepository
 from state_management.checkpoint_tracker import CheckpointTracker
-from utils.media_ffmpeg import MemoryMediaProcessor # 🌟 改用無狀態影音處理器
-
-# 匯入新版 S3 路由
+from utils.media_ffmpeg import MemoryMediaProcessor 
 from workers_python.s2_ai_consumer_service.storage.file_router import FileAndDBRouter
-
-# 環境變數與日誌設定
-env_path = script_dir.parent.parent / '.env'
-load_dotenv(dotenv_path=env_path)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [S1-Cloud] - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class S1Producer:
     def __init__(self):
-        # ❌ 徹底移除本地硬碟路徑 self.base_storage_path = ...
-
-        # 🌟 1. 初始化 S3/MinIO Router
+        # 初始化核心組件
         self.router = FileAndDBRouter(
             db_host=os.getenv('DB_HOST'),
             db_port=os.getenv('DB_PORT'),
@@ -48,13 +33,11 @@ class S1Producer:
             db_password=os.getenv('DB_PASSWORD'),
             db_name=os.getenv('DB_NAME')
         )
-
-        # 🌟 2. 初始化 IGClient (現在不需要傳入本地路徑，傳入 None 即可)
         self.ig = IGClient(None) 
+        self.yt = YTClient() 
         self.redis = RedisPublisher()
         self.db = DBRepository()
         
-        # 🌟 3. 初始化全域 Redis 與 CheckpointTracker
         self.raw_redis = redis.Redis(
             host=os.getenv('REDIS_HOST', 'localhost'),
             port=int(os.getenv('REDIS_PORT', 6379)),
@@ -64,279 +47,221 @@ class S1Producer:
         self.checkpoints = CheckpointTracker(self.raw_redis)
 
         if not self.ig.initialize_login():
+            logger.error("❌ Instagram 登入失敗，程式退出")
             sys.exit(1)
 
-    def process_media_pipeline(self, post, system_name: str, is_story: bool = False):
-        """🌟 全記憶體處理管線 (Pipeline)"""
-        # 注意：IGClient 必須實作 download_media_as_bytes，直接回傳位元組而不是存檔
-        media_list = self.ig.download_media_as_bytes(post, system_name, is_story)
-        if not media_list: return []
-
-        valid_media = []
-        for media_info in media_list:
-            filename = media_info["filename"]
-            video_bytes = media_info.get("video_bytes")
-            image_bytes = media_info.get("image_bytes")
-            media_type = "VIDEO" if media_info.get("is_video") else "IMAGE"
-            
-            main_bytes = image_bytes
-            ai_bytes = image_bytes
-            db_filename = f"{filename}.jpg"
-
-            # 🌟 在記憶體中進行影片處理
-            if media_type == "VIDEO" and video_bytes:
-                # 靜態影片偵測 (不落地)
-                if MemoryMediaProcessor.is_video_static_bytes(video_bytes):
-                    logger.info(f"✂️ 移除靜態影片，降級為圖片: {filename}")
-                    media_type = "IMAGE"
-                else:
-                    # 合併封面圖 (不落地)
-                    if image_bytes:
-                        video_bytes = MemoryMediaProcessor.merge_cover_to_video_bytes(video_bytes, image_bytes)
-                    
-                    main_bytes = video_bytes
-                    ai_bytes = image_bytes # AI 掃描專用的輕量縮圖
-                    db_filename = f"{filename}.mp4"
-
-            if main_bytes:
-                valid_media.append((main_bytes, ai_bytes, db_filename, media_type))
-                
-        return valid_media
-
-    def process_one_account(self, system_name: str, account: str, current_whitelist: dict):
-        logger.info(f"\n🔍 開始掃描: {account} (@{system_name})")
-
-        try:
-            profile = self.ig.get_profile(account)
-            account_type_row = self.db.get_account_type(account)
-            account_type_id = account_type_row[0] if account_type_row else 4
-            is_trusted = profile.is_verified or (account_type_id in [1, 2, 3])
-            if is_trusted:
-                logger.info(f"🔰 帳號信任驗證通過：將啟用直通車模式")
-            else:
-                logger.info(f"🛡️ 帳號未受信任：所有下載將進入 PENDING 隔離區")
-
-            # --- Stories (限動) ---
-            if profile.has_public_story:
-                logger.info("📸 檢查限動...")
-                for story in self.ig.L.get_stories(userids=[profile.userid]):
-                    for item in story.get_items():
-                        self.redis.throttle_if_queue_full(max_size=200)
-                        
-                        if self.ig.is_repost(item, is_story=True, system_name=system_name):
-                            logger.info(f"⏭️ 跳過限動轉發: {item.date_local}")
-                            continue
-
-                        results = self.process_media_pipeline(item, system_name, is_story=True)
-                        for main_bytes, ai_bytes, fn, mt in results:
-                            # 🌟 核心智能分流：有藍勾勾 -> 直通車(DOWNLOADED)，沒有 -> 隔離(PENDING)
-                            target_status = "DOWNLOADED" if is_trusted else "PENDING"
-                            
-                            # 🌟 新增：依據狀態動態決定 S3 的存放資料夾
-                            target_folder = "official" if is_trusted else "quarantine"
-                            
-                            asset_data = {
-                                "source_type_id": self.db.status_manager.get_id("SOURCE_TYPE", "STORY"),
-                                "download_status_id": self.db.status_manager.get_id("DOWNLOAD_STATUS", target_status),
-                                "original_username": account,
-                                "original_shortcode": getattr(item, 'shortcode', str(item.mediaid)), # 防呆: 避免部分限動沒有 shortcode 屬性
-                                "source_is_verified": int(profile.is_verified)
-                            }
-                            
-                            # 👇 最後一個參數改為動態的 target_folder
-                            self._save_and_dispatch_memory(system_name, fn, main_bytes, ai_bytes, asset_data, target_folder)
-
-            # --- Posts (貼文) ---
-            logger.info("📄 檢查貼文...")
-            checkpoint = self.checkpoints.get_checkpoint(system_name, account)
-            new_checkpoint = None
-            is_first_post = True
-            scan_completed = False
-
-            for post in self.ig.safe_generator(profile.get_posts()):
-                self.redis.throttle_if_queue_full(max_size=200)
-
-                # 🌟 使用新的 Redis Set 置頂檢查邏輯 (支援多容器併發)
-                if self.checkpoints.is_post_pinned_safe(post) or self.checkpoints.is_already_pinned(account, post.shortcode):
-                    self.checkpoints.update_pinned_list(account, post.shortcode)
-                    logger.info(f"📌 跳過置頂: {post.shortcode}")
-                    continue
-
-                if self.ig.is_repost(post, is_story=False, target_username=account, system_name=system_name, current_whitelist=current_whitelist):
-                    logger.info(f"⏭️ 跳過轉發/非本人貼文 (Owner: {post.owner_username})")
-                    continue
-
-                if is_first_post:
-                    new_checkpoint = post.shortcode
-                    is_first_post = False
-
-                if checkpoint and post.shortcode == checkpoint:
-                    logger.info(f"✓ 到達檢查點 {checkpoint}")
-                    scan_completed = True
-                    break
-                logger.info(f"⬇️ 開始下載與處理貼文: {post.shortcode} ...")
-
-                results = self.process_media_pipeline(post, system_name)
-                results = self.process_media_pipeline(post, system_name)
-                for main_bytes, ai_bytes, fn, mt in results:
-                    
-                    # 🌟 核心智能分流
-                    target_status = "DOWNLOADED" if is_trusted else "PENDING"
-                    target_folder = "official" if is_trusted else "quarantine"
-                    
-                    source_code = "REEL" if getattr(post, 'typename', '') == "GraphVideo" else "POST"
-                    asset_data = {
-                        "source_type_id": self.db.status_manager.get_id("SOURCE_TYPE", source_code),
-                        "download_status_id": self.db.status_manager.get_id("DOWNLOAD_STATUS", target_status),
-                        "original_username": account,
-                        "original_shortcode": post.shortcode,
-                        "source_is_verified": int(profile.is_verified)
-                    }
-                    
-                    # 👇 同樣使用動態的 target_folder
-                    self._save_and_dispatch_memory(system_name, fn, main_bytes, ai_bytes, asset_data, target_folder)
-
-                time.sleep(random.uniform(2, 5))
-
-            if new_checkpoint and (scan_completed or checkpoint is None):
-                self.checkpoints.save_checkpoint(system_name, account, new_checkpoint)
-            else:
-                logger.warning("⚠️ 掃描未完整銜接，不更新檢查點。")
-
-        except Exception as e:
-            logger.error(f"❌ 帳號處理異常: {e}")
-
-    def _save_and_dispatch_memory(self, system_name: str, fn: str, main_bytes: bytes, ai_bytes: bytes, asset_data: dict, target_folder: str = "official"):
-        # 1. 依據傳入的目標資料夾動態組裝 S3 路徑
+    def _save_and_dispatch_memory(self, system_name: str, fn: str, main_bytes: bytes, ai_bytes: bytes, asset_data: dict, target_folder: str):
+        """核心資產分發：上傳 S3 並寫入 DB 與任務佇列"""
         s3_key_main = f"{system_name}/{target_folder}/{fn}"
-        s3_uri_main = f"s3://{self.router.bucket_name}/{s3_key_main}"
-        
         try:
-            # ==========================================
-            # ☁️ 第一階段：雲端無狀態直傳 (Cloud-Native Upload)
-            # ==========================================
+            # 1. 上傳主檔案 (圖片或影片)
             content_type = "video/mp4" if fn.endswith(".mp4") else "image/jpeg"
             self.router.s3_client.put_object(
-                Bucket=self.router.bucket_name, 
-                Key=s3_key_main,
-                Body=main_bytes, 
-                ContentType=content_type
+                Bucket=self.router.bucket_name, Key=s3_key_main, Body=main_bytes, ContentType=content_type
             )
 
+            # 2. 如果是影片，額外上傳一張用於 AI 辨識的封面圖
             if ai_bytes and ai_bytes != main_bytes:
                 ai_fn = fn.replace(".mp4", ".jpg")
-                s3_key_ai = f"{system_name}/{target_folder}/{ai_fn}"
                 self.router.s3_client.put_object(
-                    Bucket=self.router.bucket_name, 
-                    Key=s3_key_ai,
-                    Body=ai_bytes, 
-                    ContentType="image/jpeg"
+                    Bucket=self.router.bucket_name, Key=f"{system_name}/{target_folder}/{ai_fn}", Body=ai_bytes, ContentType="image/jpeg"
                 )
 
-            asset_data["file_name"] = fn
-            asset_data["file_path"] = s3_key_main
-            asset_data["system_name"] = system_name
-            
-            # 呼叫我們上一階段重寫的防呆寫入方法
+            # 3. 完善 asset 資訊並寫入 DB
+            asset_data.update({"file_name": fn, "file_path": s3_key_main, "system_name": system_name})
             media_id = self.db.insert_media_asset(asset_data)
             
             if media_id:
-                # 🛡️ 防呆：絕對只允許狀態為 DOWNLOADED 的直通車檔案進入 AI 佇列
+                # 若為 DOWNLOADED 狀態則直接推送到 S2 AI 消費端
                 downloaded_id = self.db.status_manager.get_id("DOWNLOAD_STATUS", "DOWNLOADED")
                 if asset_data.get("download_status_id") == downloaded_id:
-                    
-                    payload = {"media_id": media_id}
-                    
-                    # 🌟 修正：使用自建的 RedisPublisher 進行安全推播
-                    self.redis.push_task(payload)
-                    
-                    logger.info(f"🚀 [放行] 成功推送任務至 S2 AI 大腦: {fn} (MediaID: {media_id})") 
+                    self.redis.push_task({"media_id": media_id})
+                    logger.info(f"🚀 [放行] 成功推送任務: {fn} (MediaID: {media_id})") 
                 else:
-                    logger.info(f"👀 [隔離] 檔案已存入緩衝區，等待前端人工審核: {fn}")
-            else:
-                logger.warning(f"♻️ DB 已有紀錄或寫入失敗，略過處理: {fn}")
-
+                    logger.info(f"👀 [隔離] 已存入隔離區等待審核: {fn}")
         except Exception as e:
-            logger.error(f"⚠️ 雲端直傳與派發發生異常: {e}")
+            logger.error(f"⚠️ 資產派發異常: {e}")
 
-    def watchdog_orphaned_downloads(self, profiles):
-        """[雲端改寫版] 掃描 S3 孤兒檔案並重新推進 Redis"""
-        logger.info("🐕 啟動 Watchdog：掃描 S3 下載區...")
-        current_time = time.time()
-        recovered_count = 0
-        
-        queue_length = self.redis.get_queue_length()
-        buffer_seconds = 10 if queue_length == 0 else 1800
-        
-        for system_name in profiles.keys():
-            prefix = f"{system_name}/downloads/"
-            try:
-                response = self.router.s3_client.list_objects_v2(
-                    Bucket=self.router.bucket_name, Prefix=prefix
-                )
+    def process_media_pipeline(self, post, system_name: str, is_story: bool = False):
+        """處理媒體下載與靜態影片降級邏輯"""
+        media_list = self.ig.download_media_as_bytes(post, system_name, is_story)
+        if not media_list: return []
+        valid_media = []
+        for media_info in media_list:
+            filename, v_bytes, i_bytes = media_info["filename"], media_info.get("video_bytes"), media_info.get("image_bytes")
+            media_type = "VIDEO" if media_info.get("is_video") else "IMAGE"
+            main_bytes, ai_bytes, db_fn = i_bytes, i_bytes, f"{filename}.jpg"
+
+            if media_type == "VIDEO" and v_bytes:
+                if MemoryMediaProcessor.is_video_static_bytes(v_bytes):
+                    media_type, db_fn = "IMAGE", f"{filename}.jpg"
+                else:
+                    main_bytes, ai_bytes, db_fn = v_bytes, i_bytes, f"{filename}.mp4"
+
+            if main_bytes: valid_media.append((main_bytes, ai_bytes, db_fn, media_type))
+        return valid_media
+
+    def process_one_ig_account(self, account: str, meta: dict, full_ig_map: dict):
+        """[地圖驅動版] 處理單一 IG 帳號"""
+        system_name, type_id = meta['system_name'], meta['type_id']
+        logger.info(f"\n🔍 掃描 IG: {account} (@{system_name}) [等級: {type_id}]")
+
+        try:
+            profile = self.ig.get_profile(account)
+            # 依據帳號類型 (1:本帳, 2:官方, 3:小帳) 判定是否信任 
+            is_trusted = profile.is_verified or (type_id in [1, 2, 3])
+            
+            # --- Stories ---
+            if profile.has_public_story:
+                for story in self.ig.L.get_stories(userids=[profile.userid]):
+                    for item in story.get_items():
+                        is_repost = self.ig.is_repost(item, is_story=True, system_name=system_name)
+                        results = self.process_media_pipeline(item, system_name, is_story=True)
+                        for m_bytes, a_bytes, fn, mt in results:
+                            target_status = "DOWNLOADED" if (is_trusted and not is_repost) else "PENDING"
+                            target_folder = "official" if (is_trusted and not is_repost) else "quarantine"
+                            asset_data = {
+                                "source_type_id": self.db.status_manager.get_id("SOURCE_TYPE", "STORY"),
+                                "download_status_id": self.db.status_manager.get_id("DOWNLOAD_STATUS", target_status),
+                                "original_username": account, "original_shortcode": getattr(item, 'shortcode', ''),
+                                "ig_media_id": str(item.mediaid), "source_is_verified": int(profile.is_verified)
+                            }
+                            self._save_and_dispatch_memory(system_name, fn, m_bytes, a_bytes, asset_data, target_folder)
+
+            # --- Posts ---
+            checkpoint = self.checkpoints.get_checkpoint(system_name, account)
+            new_cp, is_first, scan_done = None, True, False
+            for post in self.ig.safe_generator(profile.get_posts()):
+                if self.checkpoints.is_post_pinned_safe(post): continue
+                if self.ig.is_repost(post, False, account, system_name, full_ig_map): continue
+
+                if is_first: new_cp, is_first = post.shortcode, False
+                if checkpoint and post.shortcode == checkpoint: 
+                    scan_done = True
+                    break
                 
-                if 'Contents' not in response: continue
+                results = self.process_media_pipeline(post, system_name)
+                for m_bytes, a_bytes, fn, mt in results:
+                    target_status, target_folder = ("DOWNLOADED", "official") if is_trusted else ("PENDING", "quarantine")
+                    s_code = "REEL" if getattr(post, 'typename', '') == "GraphVideo" else "POST"
+                    asset_data = {
+                        "source_type_id": self.db.status_manager.get_id("SOURCE_TYPE", s_code),
+                        "download_status_id": self.db.status_manager.get_id("DOWNLOAD_STATUS", target_status),
+                        "original_username": account, "original_shortcode": post.shortcode,
+                        "ig_media_id": str(post.mediaid), "source_is_verified": int(profile.is_verified)
+                    }
+                    self._save_and_dispatch_memory(system_name, fn, m_bytes, a_bytes, asset_data, target_folder)
+                time.sleep(random.uniform(2, 4))
+            
+            if new_cp and (scan_done or checkpoint is None):
+                self.checkpoints.save_checkpoint(system_name, account, new_cp)
+        except Exception as e:
+            logger.error(f"❌ IG 處理異常 ({account}): {e}")
 
-                for obj in response['Contents']:
-                    s3_key = obj['Key']
-                    filename = os.path.basename(s3_key)
-                    if not filename: continue
-
-                    last_modified = obj['LastModified'].timestamp()
-                    file_age = current_time - last_modified
-                    
-                    if file_age > buffer_seconds:
-                        payload = {
-                            "profile": system_name,
-                            "file_path": s3_key,
-                            "timestamp": current_time,
-                            "stage": "S1_WATCHDOG_S3_RECOVERED",
-                            "reprocess": True
-                        }
-                        
-                        is_priority = not filename.lower().endswith('.mp4')
-                        self.redis.push_task(payload, is_priority=is_priority)
-                        recovered_count += 1
-            except Exception as e:
-                logger.error(f"⚠️ Watchdog S3 掃描失敗: {e}")
-
-        if recovered_count > 0:
-            logger.info(f"✅ Watchdog 完成，重新塞入 {recovered_count} 個 S3 任務。")
-        else:
-            logger.info("✅ Watchdog 完成，S3 downloads 目錄健康。")
-
-    def run_random_test(self):
-        """隨機測試模式"""
-        logger.info("🧪 啟動 S1 Producer [隨機單次測試模式 - 雲原生版]...")
-        profiles = self.db.get_dynamic_profiles()
-        whitelist = self.db.get_dynamic_whitelist()
+    def process_youtube_channel(self, system_name: str, channel_handle: str):
+        """[地圖驅動版] 處理 YouTube 頻道"""
+        logger.info(f"📺 掃描 YT: {system_name} (@{channel_handle})")
+        urls = [f"https://www.youtube.com/{channel_handle}/shorts", f"https://www.youtube.com/{channel_handle}/videos"]
         
-        all_targets = [(sys_name, acc) for sys_name, accs in profiles.items() for acc in accs]
-        if not all_targets: return
+        for url in urls:
+            try:
+                videos = self.yt.get_channel_videos(url)
+                for v in videos:
+                    if self.db.is_shortcode_exists(v['id']): continue
+                    
+                    v_path, t_path, temp_d = self.yt.download_video_to_temp(v['url'])
+                    if not v_path: continue
+                    
+                    with open(v_path, 'rb') as f: m_bytes = f.read()
+                    a_bytes = None
+                    if t_path and os.path.exists(t_path):
+                        with open(t_path, 'rb') as f: a_bytes = f.read()
+                    
+                    s_code = "YOUTUBE_SHORT" if v['is_shorts'] else "YOUTUBE_VIDEO"
+                    asset_data = {
+                        "source_type_id": self.db.status_manager.get_id("SOURCE_TYPE", s_code),
+                        "download_status_id": self.db.status_manager.get_id("DOWNLOAD_STATUS", "DOWNLOADED"),
+                        "original_username": system_name, "original_shortcode": v['id'],
+                        "ig_media_id": v['id'], "source_is_verified": 1
+                    }
+                    self._save_and_dispatch_memory(system_name, f"yt_{v['id']}.mp4", m_bytes, a_bytes, asset_data, "official")
+                    shutil.rmtree(temp_d, ignore_errors=True)
+                    time.sleep(random.uniform(3, 6))
+            except Exception as e:
+                logger.error(f"❌ YT 處理異常 ({url}): {e}")
+    def test_platform_only(self, platform_code: str, target_account: str = None):
+        """
+        [測試專用] 針對單一平台進行掃描測試
+        :param platform_code: 平台代碼 (如 'ig', 'yt', 'tiktok')
+        :param target_account: (選填) 指定測試的帳號 ID，若不填則測試該平台所有監控帳號
+        """
+        logger.info(f"🧪 啟動單一平台測試模式: [{platform_code}]")
+        
+        # 🌟 1. 取得全平台地圖
+        full_map = self.db.get_full_active_map()
+        
+        if platform_code not in full_map:
+            logger.error(f"❌ 找不到平台: {platform_code}，請檢查資料庫 platforms 表格")
+            return
 
-        target_sys, target_acc = random.choice(all_targets)
-        self.process_one_account(target_sys, target_acc, whitelist)
+        accounts = full_map[platform_code]
+        
+        # 🌟 2. 篩選測試目標
+        test_targets = []
+        if target_account:
+            if target_account in accounts:
+                test_targets.append((target_account, accounts[target_account]))
+            else:
+                logger.error(f"❌ 平台 {platform_code} 中找不到帳號: {target_account}")
+                return
+        else:
+            # 若沒指定帳號，則抓取該平台所有標記為監控中的帳號
+            test_targets = [(acc, meta) for acc, meta in accounts.items() if meta['is_monitored']]
+
+        if not test_targets:
+            logger.warning(f"⚠️ 平台 {platform_code} 沒有可測試的監控目標")
+            return
+
+        # 🌟 3. 執行對應引擎
+        for acc, meta in test_targets:
+            logger.info(f"▶️ 正在測試: {acc} (System: {meta['system_name']})")
+            
+            if platform_code == 'ig':
+                # IG 需要完整 map 來作為轉發判定的白名單
+                self.process_one_ig_account(acc, meta, accounts)
+                
+            elif platform_code == 'yt':
+                # YouTube 引擎直接處理
+                self.process_youtube_channel(meta['system_name'], acc)
+            
+            # 如果未來有 tiktok 等平台，只需在此擴充邏輯
+            
+        logger.info(f"🏁 平台 [{platform_code}] 測試完成")
 
     def run(self):
-        """正式輪詢模式"""
-        logger.info("🔥 啟動 S1 Producer [正式運行模式 - 雲原生無狀態版]...")
+        """[雙引擎並行] 主輪詢邏輯"""
+        logger.info("🔥 S1 Producer 啟動 [字典高效版]...")
         while True:
-            profiles = self.db.get_dynamic_profiles()
-            whitelist = self.db.get_dynamic_whitelist()
+            # 🌟 每次開始掃描前，只查一次 DB 獲取所有平台的活躍帳號字典
+            full_map = self.db.get_full_active_map()
             
-            for system_name, accounts in profiles.items():
-                for account in accounts:
-                    self.process_one_account(system_name, account, whitelist)
-
-            try:
-                self.watchdog_orphaned_downloads(profiles)
-            except Exception as e:
-                logger.error(f"❌ Watchdog 巡檢異常: {e}")
-
+            # 遍歷資料庫中動態定義的所有平台
+            for platform, accounts in full_map.items():
+                if platform == 'ig':
+                    for acc, meta in accounts.items():
+                        if meta['is_monitored']:
+                            self.process_one_ig_account(acc, meta, accounts)
+                
+                elif platform == 'yt':
+                    for handle, meta in accounts.items():
+                        if meta['is_monitored']:
+                            self.process_youtube_channel(meta['system_name'], handle)
+            
             logger.info("💤 本輪結束，休息 15 分鐘...")
             time.sleep(900)
 
 if __name__ == "__main__":
+    #S1Producer().run()
     producer = S1Producer()
-    # 預設執行正式模式。如果要單次測試，可改為 producer.run_random_test()
-    producer.run_random_test()
+    # 只跑 IG 平台，不跑 YouTube
+    producer.test_platform_only('yt')

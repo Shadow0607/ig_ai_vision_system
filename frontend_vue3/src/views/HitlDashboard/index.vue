@@ -62,7 +62,23 @@
           </div>
           
           <div class="info-section">
-            <div class="source-info text-purple">{{ img.targetPersonSystemName }}</div>
+            <div class="source-info">
+              <span class="username">{{ item.originalUsername }}</span>
+              <span v-if="item.sourceIsVerified" class="verified-badge" title="官方藍勾勾">☑️</span>
+            </div>
+
+            <div v-if="item.originalUsername && item.originalUsername !== item.systemName" class="repost-badge">
+              🔁 轉發自: @{{ item.originalUsername }}
+            </div>
+            
+            <div v-if="item.reviewedBy" class="reviewer-badge">
+              👨‍💻 審核員: {{ item.reviewedBy }}
+            </div>
+
+            <div class="shortcode-info" style="margin-top: 8px;">
+              <small>{{ item.originalShortcode }}</small>
+              <small class="time">{{ formatDate(item.createdAt) }}</small>
+            </div>
           </div>
           
           <div class="action-section" v-if="canReview">
@@ -93,6 +109,13 @@
             <div class="source-info">
               <span class="username">{{ item.originalUsername }}</span>
               <span v-if="item.sourceIsVerified" class="verified-badge" title="官方藍勾勾">☑️</span>
+            </div>
+            <div v-if="item.originalUsername && item.originalUsername !== item.systemName" class="repost-badge">
+              🔁 轉發自: @{{ item.originalUsername }}
+            </div>
+            
+            <div v-if="item.reviewedBy" class="reviewer-badge">
+              👨‍💻 審核員: {{ item.reviewedBy }}
             </div>
             <div class="shortcode-info">
               <small>{{ item.originalShortcode }}</small>

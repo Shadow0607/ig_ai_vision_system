@@ -34,22 +34,6 @@ public class ConfigController : ControllerBase
         _minioEndpoint = Environment.GetEnvironmentVariable("MINIO_ENDPOINT") ?? "localhost:9000";
     }
 
-    [HttpGet("profiles/python-worker")]
-    public async Task<IActionResult> GetProfilesForPython()
-    {
-        var profiles = await _context.TargetPersons.Where(p => p.IsActive).Include(p => p.SocialAccounts).ToListAsync();
-        var result = profiles.ToDictionary(p => p.SystemName, p => p.SocialAccounts.Where(sa => sa.IsMonitored && sa.PlatformId == 2).Select(sa => sa.AccountIdentifier).ToList());
-        return Ok(result);
-    }
-
-    [HttpGet("whitelists/python-worker")]
-    public async Task<IActionResult> GetWhitelistsForPython()
-    {
-        var profiles = await _context.TargetPersons.Where(p => p.IsActive).Include(p => p.SocialAccounts).ToListAsync();
-        var result = profiles.ToDictionary(p => p.SystemName, p => p.SocialAccounts.Where(sa => sa.PlatformId == 2).Select(sa => sa.AccountIdentifier).ToList());
-        return Ok(result);
-    }
-
     // ==========================================
     // 🌟 2. 獲取人物清單 (包含手動上傳的特徵照片)
     // ==========================================

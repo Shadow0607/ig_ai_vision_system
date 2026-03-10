@@ -9,20 +9,9 @@ import boto3
 import redis
 import mysql.connector
 from mysql.connector import pooling
+from shared.config_loader import setup_project_env
+setup_project_env()
 
-# 🌟 1. 新增：引入路徑解析與環境變數載入模組
-from pathlib import Path
-from dotenv import load_dotenv
-
-# 🌟 2. 核心修正：動態定位專案根目錄的 .env 檔案
-# __file__ 位於 workers_python/s5_story_feedback.py
-script_dir = Path(__file__).resolve().parent
-# 專案根目錄 (ig_ai_vision_system)
-root_path = script_dir.parent
-env_path = root_path / '.env'
-
-# 載入 .env
-load_dotenv(dotenv_path=env_path)
 
 # 系統日誌設定
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [S5_FEEDBACK] - %(levelname)s - %(message)s')
@@ -40,11 +29,13 @@ class S5StoryFeedbackManager:
         
         # 定義狀態字典 (預設依據最新 DB Schema ID)
         self.STATUS = {
-            'MEDIA_TYPE_IMAGE': 34,
-            'MEDIA_TYPE_VIDEO': 35,
-            'STATIC_FAKE_VIDEO': 40
+            'MEDIA_TYPE_IMAGE': self.get_status_id('MEDIA_TYPE', 'IMAGE'),
+            'MEDIA_TYPE_VIDEO': self.get_status_id('MEDIA_TYPE', 'VIDEO'),
+            
+            # 🌟 這裡請依據你實際在資料庫建立的 Category 來填寫，通常是 DOWNLOAD_STATUS
+            'STATIC_FAKE_VIDEO': self.get_status_id('DOWNLOAD_STATUS', 'STATIC_FAKE_VIDEO') 
         }
-
+        logger.info(f"✅ 動態讀取狀態 ID 完畢: {self.STATUS}")
     def _init_db_pool(self):
         """初始化 MySQL 連線池"""
         self.db_pool = mysql.connector.pooling.MySQLConnectionPool(
@@ -90,12 +81,13 @@ class S5StoryFeedbackManager:
         conn = self.db_pool.get_connection()
         try:
             with conn.cursor(dictionary=True) as cursor:
-                # 撈取 media_type_id 為影片(35)，且尚未被標記為假影片的紀錄
+                # 🌟 新增條件：AND s5_checked = FALSE
                 query = """
                     SELECT id, file_name, file_path, system_name, account_id 
                     FROM media_assets 
                     WHERE media_type_id = %s 
                     AND download_status_id != %s
+                    AND s5_checked = FALSE
                     ORDER BY created_at DESC LIMIT 50
                 """
                 cursor.execute(query, (self.STATUS['MEDIA_TYPE_VIDEO'], self.STATUS['STATIC_FAKE_VIDEO']))
@@ -218,6 +210,23 @@ class S5StoryFeedbackManager:
 
         except Exception as e:
             logger.error(f"❌ 處理降級與回推失敗: {e}")
+    def get_status_id(self, category: str, code: str) -> int:
+        """動態從資料庫抓取對應的狀態 ID"""
+        conn = self.db_pool.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT id FROM sys_statuses WHERE category = %s AND code = %s LIMIT 1",
+                    (category, code)
+                )
+                result = cursor.fetchone()
+                if result:
+                    return result[0]
+                else:
+                    logger.error(f"❌ 資料庫找不到對應的狀態: Category={category}, Code={code}")
+                    return 0
+        finally:
+            conn.close()
 
     def run(self):
         """執行 S5 背景排程守護進程"""
@@ -225,6 +234,10 @@ class S5StoryFeedbackManager:
         while True:
             try:
                 videos = self.fetch_unprocessed_videos()
+                
+                # 🌟 新增：讓程式大聲告訴你它撈到了幾筆
+                logger.info(f"🔍 掃描完畢，本次共撈取到 {len(videos)} 筆待檢測的影片。")
+
                 for asset in videos:
                     s3_key = asset['file_path'].replace(f"s3://{self.bucket_name}/", "")
                     
@@ -239,11 +252,27 @@ class S5StoryFeedbackManager:
                             logger.info(f"⚠️ 偵測到靜態假影片: {asset['file_name']}，啟動降級瘦身程序。")
                             self.downgrade_and_requeue(asset, first_frame)
                         else:
-                            # 即使是真影片，也可標記為已檢測 (避免重複撈取)，此處可依需求擴充狀態
-                            pass
+                            # 🌟 新增：寫入資料庫，標記 s5_checked = TRUE
+                            conn = self.db_pool.get_connection()
+                            try:
+                                with conn.cursor() as cursor:
+                                    cursor.execute(
+                                        "UPDATE media_assets SET s5_checked = TRUE WHERE id = %s", 
+                                        (asset['id'],)
+                                    )
+                                    conn.commit()
+                            except Exception as e:
+                                logger.error(f"❌ 更新 s5_checked 失敗: {e}")
+                            finally:
+                                conn.close()
+                                
+                            logger.info(f"✅ 確認為真實動態影片，已標記免查: {asset['file_name']}")
 
-                # 排程休眠
-                time.sleep(60 * 15) # 每 15 分鐘巡迴一次
+                # 🌟 新增：讓你知道它要去睡覺了
+                logger.info("💤 本輪任務結束，進入休眠...")
+                
+                # 🌟 測試階段先改成睡 10 秒就好，確定沒問題再改回 60 * 15 (15分鐘)
+                time.sleep(10) 
             
             except Exception as e:
                 logger.error(f"S5 飛輪執行發生未預期錯誤: {e}")

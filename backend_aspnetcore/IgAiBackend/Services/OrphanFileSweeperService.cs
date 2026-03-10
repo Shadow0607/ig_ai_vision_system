@@ -10,111 +10,117 @@ using Minio;
 using Minio.DataModel.Args;
 using IgAiBackend.Data;
 using IgAiBackend.Models;
+using Microsoft.Extensions.Options;
 
-namespace IgAiBackend.Services
+namespace IgAiBackend.Services 
 {
-    public class OrphanFileSweeperService : BackgroundService
+    public class OrphanFileSweeperService : BackgroundService 
     {
         private readonly IServiceProvider _serviceProvider;
         private readonly ILogger<OrphanFileSweeperService> _logger;
         private readonly IMinioClient _minioClient;
-        private readonly string _bucketName = "ig-ai-assets";
+        private readonly string _bucketName;
 
-        // ⚠️ 注意：BackgroundService 是 Singleton，不能直接注入 Scoped 的 DbContext
-        // 必須注入 IServiceProvider 來動態建立 Scope
         public OrphanFileSweeperService(
-            IServiceProvider serviceProvider,
-            ILogger<OrphanFileSweeperService> logger,
-            IMinioClient minioClient)
+            IServiceProvider serviceProvider, 
+            ILogger<OrphanFileSweeperService> logger, 
+            IMinioClient minioClient,
+            IOptions<MinioSettings> minioSettings) 
         {
             _serviceProvider = serviceProvider;
             _logger = logger;
             _minioClient = minioClient;
+            _bucketName = minioSettings.Value.BucketName;
         }
 
-        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+        protected override async Task ExecuteAsync(CancellationToken stoppingToken) 
         {
-            _logger.LogInformation("🧹 [自動清理排程] OrphanFileSweeperService 已啟動，守護 NAS 空間中...");
+            _logger.LogInformation("🛡️ NAS 死信與孤兒檔案清理排程已啟動 (動態狀態尋址模式)。");
 
-            // 系統啟動後先等待 5 分鐘再執行第一次掃描，避免拖慢系統啟動速度
-            await Task.Delay(TimeSpan.FromMinutes(5), stoppingToken);
-
-            while (!stoppingToken.IsCancellationRequested)
+            while (!stoppingToken.IsCancellationRequested) 
             {
-                try
+                try 
                 {
-                    await SweepOrphanFilesAsync(stoppingToken);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "❌ [自動清理排程] 發生未預期崩潰，將於下個週期重試。");
-                }
-
-                // ⏳ 設定巡邏間隔：每 12 小時執行一次掃描
-                await Task.Delay(TimeSpan.FromHours(12), stoppingToken);
-            }
-        }
-
-        private async Task SweepOrphanFilesAsync(CancellationToken stoppingToken)
-        {
-            // 動態建立 Scope 取得 DbContext
-            using var scope = _serviceProvider.CreateScope();
-            var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-
-            // 定義：72 小時前的時間死線
-            var deadline = DateTime.UtcNow.AddHours(-72);
-
-            // 尋找目標：狀態為 PENDING(25) 且 來源為 STORY(31) 且 建立時間超過 72 小時 [1-3]
-            var orphanAssets = await context.MediaAssets
-                .Where(m => m.DownloadStatusId == 25 
-                         && m.SourceTypeId == 31 
-                         && m.CreatedAt <= deadline)
-                .ToListAsync(stoppingToken);
-
-            if (!orphanAssets.Any())
-            {
-                _logger.LogInformation("🔍 [自動清理排程] 掃描完成，沒有需要清理的孤兒檔案。");
-                return;
-            }
-
-            _logger.LogWarning($"⚠️ [自動清理排程] 發現 {orphanAssets.Count} 筆逾期未審核的隔離限動，準備執行物理抹除！");
-
-            int successCount = 0;
-
-            foreach (var asset in orphanAssets)
-            {
-                // 🌟 導入分散式交易，確保「刪除檔案」與「改 DB 狀態」是原子操作
-                using var transaction = await context.Database.BeginTransactionAsync(stoppingToken);
-                try
-                {
-                    // 1. 執行物理抹除 (從 MinIO NAS 刪除)
-                    // 🛡️ 防呆：絕對確保只有 quarantine/ 目錄下的檔案才能被此排程刪除
-                    if (!string.IsNullOrEmpty(asset.FilePath) && asset.FilePath.Contains("quarantine/"))
+                    // 1. 建立獨立的生命週期 Scope，避免 BackgroundService 導致 Memory Leak
+                    using (var scope = _serviceProvider.CreateScope()) 
                     {
-                        var objectName = asset.FilePath.Split(new[] { _bucketName + "/" }, StringSplitOptions.None).LastOrDefault();
-                        if (!string.IsNullOrEmpty(objectName))
+                        var dbContext = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+                        
+                        // ========================================================
+                        // 🌟 核心優化：動態取得 Status ID，徹底消滅 Magic Numbers
+                        // ========================================================
+                        var pendingStatus = await dbContext.SysStatuses
+                            .AsNoTracking()
+                            .FirstOrDefaultAsync(s => s.Category == "DOWNLOAD_STATUS" && s.Code == "PENDING", stoppingToken);
+
+                        var errorStatus = await dbContext.SysStatuses
+                            .AsNoTracking()
+                            .FirstOrDefaultAsync(s => s.Category == "DOWNLOAD_STATUS" && s.Code == "ERROR", stoppingToken);
+
+                        if (pendingStatus == null || errorStatus == null)
                         {
-                            await _minioClient.RemoveObjectAsync(new RemoveObjectArgs()
-                                .WithBucket(_bucketName)
-                                .WithObject(objectName), stoppingToken);
+                            _logger.LogWarning("⚠️ 系統狀態庫 (sys_statuses) 尚未初始化 PENDING 或 ERROR 狀態，本次清理略過。");
+                            await Task.Delay(TimeSpan.FromHours(1), stoppingToken);
+                            continue;
+                        }
+
+                        // 2. 尋找超過 24 小時仍卡在 PENDING 的無效任務
+                        var deadThreshold = DateTime.UtcNow.AddDays(-1);
+                        bool hasMoreTasks = true;
+
+                        // 🌟 加入迴圈：只要還有死信任務，就繼續每批 100 筆往下清
+                        while (hasMoreTasks && !stoppingToken.IsCancellationRequested)
+                        {
+                            var deadTasks = await dbContext.MediaAssets
+                                .Where(m => m.DownloadStatusId == pendingStatus.Id && m.CreatedAt < deadThreshold)
+                                .Take(100) // 每次處理 100 筆，防止記憶體崩潰
+                                .ToListAsync(stoppingToken);
+
+                            if (!deadTasks.Any())
+                            {
+                                hasMoreTasks = false; // 沒資料了，結束迴圈準備去睡 12 小時
+                                continue;
+                            }
+
+                            foreach (var task in deadTasks) 
+                            {
+                                _logger.LogWarning($"🧹 偵測到死信任務 (MediaID: {task.Id})，準備清理...");
+                                
+                                // 3. NAS 實體防呆刪除
+                                if (!string.IsNullOrWhiteSpace(task.FilePath)) 
+                                {
+                                    try
+                                    {
+                                        var removeArgs = new RemoveObjectArgs()
+                                            .WithBucket(_bucketName)
+                                            .WithObject(task.FilePath);
+                                        await _minioClient.RemoveObjectAsync(removeArgs, stoppingToken);
+                                        _logger.LogInformation($"🗑️ 已從 NAS 刪除殘留檔案: {task.FilePath}");
+                                    }
+                                    catch (Exception minioEx)
+                                    {
+                                        _logger.LogError($"NAS 刪除失敗 ({task.FilePath}): {minioEx.Message}");
+                                    }
+                                }
+
+                                // 4. 動態寫入 Error ID，封印任務
+                                task.DownloadStatusId = errorStatus.Id; 
+                            }
+
+                            // 存檔並紀錄
+                            await dbContext.SaveChangesAsync(stoppingToken);
+                            _logger.LogInformation($"✅ 本批次已成功清理 {deadTasks.Count} 筆死信任務。");
                         }
                     }
-
-                    // 2. 更新資料庫狀態為 SKIPPED (28) [3]
-                    asset.DownloadStatusId = 28; 
-                    await context.SaveChangesAsync(stoppingToken);
-                    await transaction.CommitAsync(stoppingToken);
-
-                    successCount++;
                 }
-                catch (Exception ex)
+                catch (Exception ex) 
                 {
-                    await transaction.RollbackAsync(stoppingToken);
-                    _logger.LogError(ex, $"🗑️ [自動清理排程] 檔案清理失敗 (MediaId: {asset.Id})，已 Rollback");
+                    _logger.LogError($"清理排程發生嚴重異常: {ex.Message}");
                 }
-            }
 
-            _logger.LogInformation($"✅ [自動清理排程] 任務完成，成功釋放 {successCount} 筆隔離區檔案與空間。");
+                // 休眠 12 小時 (等待下一次掃描)
+                await Task.Delay(TimeSpan.FromHours(12), stoppingToken);
+            }
         }
     }
 }

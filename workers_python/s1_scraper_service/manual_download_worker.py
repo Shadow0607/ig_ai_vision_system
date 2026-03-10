@@ -1,27 +1,22 @@
 import os
+from pathlib import Path
 import sys
 import json
 import time
 import logging
-from pathlib import Path
-from dotenv import load_dotenv
 import redis
 import instaloader
 import boto3
 from botocore.config import Config
 import requests
-
-# 解決跨資料夾 import 問題
-script_dir = Path(__file__).resolve().parent
-workers_path = str(script_dir.parent)
-if workers_path not in sys.path:
-    sys.path.insert(0, workers_path)
+workers_dir = str(Path(__file__).resolve().parent.parent)
+if workers_dir not in sys.path:
+    sys.path.insert(0, workers_dir)
+from shared.config_loader import setup_project_env
+ROOT_DIR = setup_project_env()
 
 from state_management.db_repository import DBRepository
 
-# 載入環境變數
-env_path = script_dir.parent.parent / '.env'
-load_dotenv(dotenv_path=env_path)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [Manual-Worker] - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -134,7 +129,7 @@ class ManualDownloadWorker:
                     Body=thumb_bytes,
                     ContentType="image/jpeg"
                 )
-            downloaded_id = self.db.status_manager.get_id("DOWNLOAD_STATUS", "DOWNLOADED")
+            downloaded_id = self.db_repo.status_manager.get_id("DOWNLOAD_STATUS", "DOWNLOADED")
             # 🌟 6. 更新 MySQL (直接存入 target_key，不再帶有 s3:// 前綴)
             self._update_db_status(media_id, target_key, downloaded_id)
             

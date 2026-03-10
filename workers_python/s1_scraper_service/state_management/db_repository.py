@@ -1,25 +1,20 @@
 import os
 import time
 import logging
-import requests
 from mysql.connector import pooling
 from shared.sys_status_manager import SysStatusManager
+
 logger = logging.getLogger(__name__)
 
 class DBRepository:
     def __init__(self):
         self.pool = self._create_db_pool()
-        self.status_manager = SysStatusManager() # 確保此 Manager 有從 Redis 載入 sys_statuses
+        self.status_manager = SysStatusManager()
         
-        # 🌟 修正：從環境變數動態讀取，預設給定開發環境
-        base_api_url = os.getenv('API_BASE_URL', 'http://localhost:5000')
-        self.api_config_url = f"{base_api_url}/api/Config/profiles/python-worker"
-        self.api_whitelist_url = f"{base_api_url}/api/Config/whitelists/python-worker"
-
     def _create_db_pool(self):
         db_config = {
             'host': os.getenv('DB_HOST'),
-            'port': int(os.getenv('DB_PORT')),
+            'port': int(os.getenv('DB_PORT', 3306)),
             'user': os.getenv('DB_USER'),
             'password': os.getenv('DB_PASSWORD'),
             'database': os.getenv('DB_NAME'),
@@ -30,130 +25,92 @@ class DBRepository:
         }
         return pooling.MySQLConnectionPool(**db_config)
 
-    def _get_connection(self):
-        for _ in range(3):
-            try:
-                conn = self.pool.get_connection()
-                if conn.is_connected(): return conn
-            except Exception as e:
-                logger.warning(f"⚠️ 取得 DB 連線失敗，重試中... {e}")
-                time.sleep(1)
-        return None
+    def _execute_query(self, query, params=None, fetch=True, dictionary=True):
+        """統一的 SQL 執行工具"""
+        conn = self.pool.get_connection()
+        try:
+            with conn.cursor(dictionary=dictionary) as cursor:
+                cursor.execute(query, params or ())
+                if fetch:
+                    return cursor.fetchall()
+                conn.commit()
+                return cursor.lastrowid
+        except Exception as e:
+            logger.error(f"❌ SQL 執行異常: {e}")
+            if not fetch: conn.rollback()
+            return None
+        finally:
+            conn.close()
 
-    def get_dynamic_profiles(self) -> dict:
-        try:
-            res = requests.get(self.api_config_url, timeout=5)
-            if res.status_code == 200: return res.json()
-        except: pass
-        return {}
-    
-    def get_dynamic_whitelist(self) -> dict:
-        try:
-            res = requests.get(self.api_whitelist_url, timeout=5)
-            if res.status_code == 200: return res.json()
-        except: pass
-        return {}
+    # 🌟 動態生成平台字典的優化版本
+    def get_full_active_map(self) -> dict:
+        """
+        1. 從 platforms 資料表動態抓取所有平台代碼 
+        2. 抓取所有活躍帳號資料並自動分類
+        """
+        # --- 第一步：動態初始化字典 ---
+        platforms_rows = self._execute_query("SELECT code FROM platforms")
+        # 根據資料庫內容動態生成 {'yt': {}, 'ig': {}, ...} [cite: 23]
+        data_map = {row['code']: {} for row in platforms_rows} if platforms_rows else {}
+
+        # --- 第二步：抓取帳號細節並填入 ---
+        query = """
+            SELECT p.code AS platform, s.account_identifier, t.system_name, 
+                   s.account_type_id, s.is_monitored
+            FROM social_accounts s
+            JOIN target_persons t ON s.person_id = t.id
+            JOIN platforms p ON s.platform_id = p.id
+            WHERE t.is_active = 1
+        """
+        results = self._execute_query(query)
+        
+        if results:
+            for row in results:
+                p_code = row['platform']
+                # 確保平台代碼存在於 map 中（防呆）
+                if p_code not in data_map:
+                    data_map[p_code] = {}
+                
+                # 以帳號名稱作為 Key，儲存所有必要資訊
+                data_map[p_code][row['account_identifier']] = {
+                    'system_name': row['system_name'],     # 人物系統代號 [cite: 61]
+                    'type_id': row['account_type_id'],     # 權限等級 (1-5) [cite: 36]
+                    'is_monitored': row['is_monitored']    # 是否需掃描 [cite: 36]
+                }
+        return data_map
 
     def insert_media_asset(self, asset_data: dict) -> int:
-        """
-        寫入媒體資產，並具備智慧型防呆推斷機制，確保不違反 MySQL NOT NULL 約束。
-        """
-        file_path = asset_data.get("file_path", "")
-
-        # 🛡️ 防呆 1：自動解析檔名 (file_name)
-        file_name = asset_data.get("file_name")
-        if not file_name and file_path:
-            file_name = file_path.split("/")[-1]
-
-        # 🛡️ 防呆 2：自動判斷媒體類型 (media_type_id)
-        # 依據 sys_statuses 定義: 34=IMAGE, 35=VIDEO
-        media_type_id = asset_data.get("media_type_id")
-        if not media_type_id:
-            type_code = "VIDEO" if file_path.endswith(".mp4") else "IMAGE"
-            media_type_id = self.status_manager.get_id("MEDIA_TYPE", type_code)
-
-        # 🛡️ 防呆 3：自動反查人物系統代號 (system_name)
-        system_name = asset_data.get("system_name")
-        person_id = asset_data.get("person_id")
-        if not system_name and person_id:
-            system_name = self._get_system_name_by_person_id(person_id)
-
-        # 明確且安全的參數化 SQL 語句
+        """寫入媒體資產紀錄 (包含 IG/YT 共通欄位) [cite: 15]"""
         query = """
             INSERT INTO media_assets (
                 person_id, system_name, file_name, file_path,
                 media_type_id, source_type_id, download_status_id,
-                original_username, original_shortcode, source_is_verified
-            ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-            )
+                original_username, original_shortcode, ig_media_id, source_is_verified
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
-        
-        # 嚴格的 Tuple 賦值，防止 SQL Injection
+        # 自動推斷媒體類型 [cite: 49]
+        file_name = asset_data.get("file_name", "")
+        m_type = "VIDEO" if file_name.lower().endswith(".mp4") else "IMAGE"
+        media_type_id = self.status_manager.get_id("MEDIA_TYPE", m_type)
+
         values = (
-            person_id,
-            system_name or "unknown",
-            file_name or "unknown",
-            file_path,
+            asset_data.get("person_id"),
+            asset_data.get("system_name", "unknown"),
+            file_name,
+            asset_data.get("file_path"),
             media_type_id,
             asset_data.get("source_type_id"),
             asset_data.get("download_status_id"),
             asset_data.get("original_username"),
-            asset_data.get("original_shortcode"),
+            asset_data.get("original_shortcode"), # 儲存 IG shortcode 或 YT Video ID [cite: 16]
+            asset_data.get("ig_media_id"), 
             asset_data.get("source_is_verified", 0)
         )
+        return self._execute_query(query, values, fetch=False)
 
-        conn = self.pool.get_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute(query, values)
-                conn.commit()
-                return cursor.lastrowid
-        except Exception as e:
-            logger.error(f"❌ 寫入 media_assets 失敗: {str(e)}\n資料: {values}")
-            conn.rollback()
-            return 0
-        finally:
-            conn.close()
-
-    def _get_system_name_by_person_id(self, person_id: int) -> str:
-        """從 target_persons 反查 system_name (用於防呆補全)"""
-        query = "SELECT system_name FROM target_persons WHERE id = %s LIMIT 1"
-        conn = self.pool.get_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute(query, (person_id,))
-                result = cursor.fetchone()
-                return result if result else "unknown"
-        finally:
-            conn.close()
     def is_shortcode_exists(self, shortcode: str) -> bool:
-        """[防線一] 檢查是否已存在相同的轉發貼文/影片，防止重複下載"""
-        if not shortcode:
-            return False
+        """去重檢查：同時支援 IG 與 YouTube ID [cite: 16]"""
+        if not shortcode: return False
         query = "SELECT id FROM media_assets WHERE original_shortcode = %s LIMIT 1"
-        conn = self.pool.get_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute(query, (shortcode,))
-                return cursor.fetchone() is not None
-        finally:
-            conn.close()
-
-    def get_account_type(self, username: str) -> int:
-        """查詢帳號白名單權限級別 (1:本帳, 2:官方, 3:小帳, 4:粉絲, 5:協作)"""
-        if not username:
-            return None
-        query = """
-            SELECT account_type_id FROM social_accounts 
-            WHERE account_identifier = %s AND is_monitored = 1
-            LIMIT 1
-        """
-        conn = self.pool.get_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute(query, (username,))
-                result = cursor.fetchone()
-                return result if result else None
-        finally:
-            conn.close()
+        res = self._execute_query(query, (shortcode,))
+        return len(res) > 0 if res else False

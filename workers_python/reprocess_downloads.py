@@ -2,14 +2,10 @@ import os
 import sys
 import json
 import redis
-from pathlib import Path
-from dotenv import load_dotenv
-
 # 設定
 QUEUE_NAME = "ig_processing_queue"
-script_dir = Path(__file__).resolve().parent
-env_path = script_dir.parent / '.env'
-load_dotenv(dotenv_path=env_path)
+from shared.config_loader import setup_project_env
+ROOT_DIR = setup_project_env()
 
 def main():
     if len(sys.argv) < 2:
@@ -20,7 +16,7 @@ def main():
     system_name = sys.argv[1]
     
     # 自動抓取 storage_volumes 路徑
-    base_storage = script_dir.parent / "storage_volumes"
+    base_storage = ROOT_DIR / "storage_volumes"
     downloads_dir = base_storage / system_name / "downloads"
 
     if not downloads_dir.exists():

@@ -42,3 +42,28 @@
 .full-view-overlay { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.85); display: flex; justify-content: center; align-items: center; z-index: 9999; }
 .full-view-img { max-width: 90%; max-height: 90%; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
 .close-btn { position: absolute; top: 20px; right: 30px; background: none; border: none; color: white; font-size: 30px; cursor: pointer; }
+/* 🌟 轉發與審核員專屬標籤 */
+.repost-badge { 
+  display: inline-block; 
+  background: #f3e8ff; 
+  color: #7e22ce; 
+  font-size: 11px; 
+  padding: 4px 8px; 
+  border-radius: 6px; 
+  margin-top: 6px; 
+  font-weight: bold; 
+  width: fit-content; 
+}
+
+.reviewer-badge { 
+  display: inline-block; 
+  background: #ecfdf5; 
+  color: #10b981; 
+  font-size: 11px; 
+  padding: 4px 8px; 
+  border-radius: 6px; 
+  margin-top: 6px; 
+  font-weight: bold; 
+  border: 1px solid #10b981; 
+  width: fit-content; 
+}

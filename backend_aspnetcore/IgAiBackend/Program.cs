@@ -10,7 +10,8 @@ using System.Security.Cryptography;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
 // 🌟 1. 新增引入反向代理標頭處理的命名空間
-using Microsoft.AspNetCore.HttpOverrides; 
+using Microsoft.AspNetCore.HttpOverrides;
+using IgAiBackend.Models;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -115,6 +116,7 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
     options.KnownNetworks.Clear();
     options.KnownProxies.Clear();
 });
+builder.Services.Configure<MinioSettings>(builder.Configuration.GetSection("MinioSettings"));
 
 // ====================================================
 // 🌟 6. 動態 CORS 設定 (從 .env 讀取白名單)

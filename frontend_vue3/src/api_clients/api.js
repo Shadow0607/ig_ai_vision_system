@@ -16,6 +16,7 @@ apiClient.interceptors.response.use(
 );
 
 export default {
+  apiClient,
   getMe() { return apiClient.get('/auth/me'); },
   logout() { return apiClient.post('/auth/logout'); },
   login(credentials) { return apiClient.post('/auth/login', credentials); },

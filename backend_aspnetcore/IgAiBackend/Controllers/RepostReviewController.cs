@@ -8,6 +8,7 @@ using Minio;
 using Minio.DataModel.Args;
 using System.Text.Json;
 using System.Security.Claims;
+using Microsoft.Extensions.Options;
 
 namespace IgAiBackend.Controllers;
 
@@ -19,16 +20,18 @@ public class RepostReviewController : ControllerBase
     private readonly ApplicationDbContext _context;
     private readonly IConnectionMultiplexer _redis;
     private readonly IMinioClient _minioClient;
-    private readonly string _bucketName = "ig-ai-assets";
+    private readonly string _bucketName; // 🌟 移除寫死的值
 
     public RepostReviewController(
         ApplicationDbContext context, 
         IConnectionMultiplexer redis, 
-        IMinioClient minioClient)
+        IMinioClient minioClient,
+        IOptions<MinioSettings> minioSettings)
     {
         _context = context;
         _redis = redis;
         _minioClient = minioClient;
+        _bucketName = minioSettings.Value.BucketName;
     }
 
     // ==========================================
