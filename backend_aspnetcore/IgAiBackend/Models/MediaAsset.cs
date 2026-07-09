@@ -68,4 +68,10 @@ public class MediaAsset
     public string? IgMediaId { get; set; }
     [Column("s5_checked")]
     public bool S5Checked { get; set; } = false;
+
+    [Column("file_size_bytes")]
+    public long FileSizeBytes { get; set; } // 🌟 新增對齊 Python 端存檔內容
+
+    [Column("file_hash")] // 🌟 修正：從 image_hash 改為 file_hash，對齊資料庫與 Python 工具
+    public string? FileHash { get; set; } 
 }

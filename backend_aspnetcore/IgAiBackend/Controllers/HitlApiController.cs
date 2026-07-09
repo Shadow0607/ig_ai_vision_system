@@ -5,11 +5,9 @@ using IgAiBackend.Data;
 using IgAiBackend.Models;
 using StackExchange.Redis;
 using System.Text.Json;
-using Minio;
-using Minio.DataModel.Args;
-
 using Microsoft.AspNetCore.Authorization;
 using IgAiBackend.Helpers;
+using IgAiBackend.Services;
 
 namespace IgAiBackend.Controllers;
 
@@ -20,19 +18,21 @@ public class HitlApiController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
     private readonly IConnectionMultiplexer _redis;
-    private readonly IMinioClient _minioClient;
     private readonly string _bucketName;
     private readonly string _minioEndpoint;
+    
+    // 🌟 注入共用的 S3 服務
+    private readonly IS3MediaStorageService _s3Service;
 
     public HitlApiController(
         ApplicationDbContext context,
         IConnectionMultiplexer redis,
-        IMinioClient minioClient,
-        IConfiguration config)
+        IConfiguration config,
+        IS3MediaStorageService s3Service) // 💡 移除了原本的 IMinioClient，讓控制器更專注
     {
         _context = context;
         _redis = redis;
-        _minioClient = minioClient;
+        _s3Service = s3Service;
 
         _bucketName = config["Minio:BucketName"] ?? "ig-ai-assets";
         _minioEndpoint = config["Minio:Endpoint"] ?? "localhost:9000";
@@ -46,7 +46,6 @@ public class HitlApiController : ControllerBase
 
         try
         {
-            // 🌟 步驟 1：只從資料庫撈取純資料，不做任何字串插值或 Replace (避免 EF Core 翻譯報錯)
             var rawData = await _context.AiAnalysisLogs
                 .Include(a => a.MediaAsset)
                 .ThenInclude(m => m.Person)
@@ -63,13 +62,12 @@ public class HitlApiController : ControllerBase
                                  ? a.MediaAsset.Person.SystemName
                                  : "Unknown",
                     Score = a.ConfidenceScore,
-                    FilePath = a.MediaAsset != null ? a.MediaAsset.FilePath : "", // 💡 這裡只抓純文字路徑
+                    FilePath = a.MediaAsset != null ? a.MediaAsset.FilePath : "",
                     StatusName = a.Status!.DisplayName,
                     StatusColor = a.Status!.UiColor
                 })
-                .ToListAsync(); // 💡 觸發 SQL 執行，將資料拉回 C# 記憶體
+                .ToListAsync(); 
 
-            // 🌟 步驟 2：資料已經在記憶體中了，我們現在可以安全地使用 C# 進行字串拼接與防呆
             var pending = rawData.Select(a => new
             {
                 Id = a.Id,
@@ -78,7 +76,6 @@ public class HitlApiController : ControllerBase
                 SystemName = a.SystemName,
                 Score = a.Score,
 
-                // 加入 !string.IsNullOrEmpty 保護，避免 FilePath 為空時引爆錯誤
                 Url = !string.IsNullOrEmpty(a.FilePath)
                       ? $"http://{_minioEndpoint}/{_bucketName}/{a.FilePath}"
                       : "",
@@ -97,25 +94,18 @@ public class HitlApiController : ControllerBase
         }
         catch (Exception ex)
         {
-            // 把 ToString() 印出來，萬一還有錯可以看清楚是哪一行
             Console.WriteLine($"\n[Hitl Api 嚴重錯誤] \n{ex.ToString()}\n");
             return StatusCode(500, new { message = "資料庫查詢錯誤，請查看後端 Log。" });
         }
     }
+
     [HttpPost("approve")]
     [Authorize]
     public async Task<IActionResult> ApproveHitl([FromBody] HitlApproveDto dto)
     {
-        // ==========================================
-        // 🛡️ 1. 基礎畫面操作權限校驗
-        // ==========================================
         if (!await PermissionHelper.HasPermissionAsync(_context, User, "HitlDashboard", "Update", _redis))
             return StatusCode(403, new { message = "🚫 您不具備執行覆核操作的權限。" });
 
-        // ==========================================
-        // 🛡️ 2. 終極資安防線：嚴格校驗 JWT RoleId 
-        // 防止 Guest (Role 3) 透過 API 攻擊竄改 AI 特徵庫
-        // ==========================================
         var roleClaim = User.FindFirst("RoleId")?.Value;
         if (!int.TryParse(roleClaim, out int roleId) || roleId == 3)
         {
@@ -124,7 +114,6 @@ public class HitlApiController : ControllerBase
 
         long targetId = dto.ImageId ?? dto.Id ?? dto.MediaId ?? 0;
 
-        // 🌟 3. 動態取得核准的狀態 ID (加入防呆)
         var confirmedId = await _context.SysStatuses
             .Where(s => s.Category == "AI_RECOGNITION" && s.Code == "HITL_CONFIRMED")
             .Select(s => s.Id)
@@ -141,22 +130,17 @@ public class HitlApiController : ControllerBase
         if (log == null || log.MediaAsset == null)
             return NotFound(new { message = "找不到該筆紀錄或已被處理" });
 
-        // 🌟 4. 執行 S3 檔案搬移與狀態更新
-        if (await ProcessSingleApproveAsync(log, log.MediaAsset.SystemName, confirmedId))
+        string currentUser = User.Identity?.Name ?? "SystemAdmin";
+
+        // 🌟 核心變更：S3 若成功，會一併把狀態更新處理好；失敗則什麼都不會發生
+        if (await ProcessSingleApproveAsync(log, log.MediaAsset.SystemName, confirmedId, currentUser))
         {
-            // 🌟 稽核重點：紀錄是哪個管理員放行的，並將人類確認的信心分數設為 100%
-            log.ReviewedBy = User.Identity?.Name ?? "SystemAdmin";
-            log.ConfidenceScore = 1.0f;
-
             await _context.SaveChangesAsync();
-
-            // 🌟 觸發 AI 非同步重建向量特徵庫
             await TriggerFeatureBankRebuild(log.MediaAsset.SystemName);
-
             return Ok(new { message = "✅ 審核通過！檔案已納入特徵庫，AI 將於背景開始重新學習。" });
         }
 
-        return BadRequest(new { message = "❌ S3 檔案搬移失敗，請檢查 NAS 連線狀態。" });
+        return BadRequest(new { message = "❌ S3 檔案搬移失敗，請檢查檔案是否存在或 NAS 連線狀態。" });
     }
 
     [HttpPost("reject")]
@@ -168,7 +152,6 @@ public class HitlApiController : ControllerBase
 
         long targetId = dto.ImageId ?? dto.Id ?? dto.MediaId ?? 0;
 
-        // 🌟 1. 取得拒絕的狀態 ID
         var rejectedId = await _context.SysStatuses.Where(s => s.Category == "AI_RECOGNITION" && s.Code == "REJECTED").Select(s => s.Id).FirstOrDefaultAsync();
 
         var log = await _context.AiAnalysisLogs
@@ -178,14 +161,16 @@ public class HitlApiController : ControllerBase
 
         if (log == null || log.MediaAsset == null) return NotFound(new { message = "找不到該筆紀錄或已被處理" });
 
-        if (await ProcessSingleRejectAsync(log, log.MediaAsset.SystemName, rejectedId))
+        string currentUser = User.Identity?.Name ?? "SystemAdmin";
+
+        if (await ProcessSingleRejectAsync(log, log.MediaAsset.SystemName, rejectedId, currentUser))
         {
             await _context.SaveChangesAsync();
             await TriggerFeatureBankRebuild(log.MediaAsset.SystemName);
             return Ok(new { message = "已拒絕，檔案已移至 GARBAGE" });
         }
 
-        return BadRequest(new { message = "S3 檔案搬移失敗" });
+        return BadRequest(new { message = "❌ S3 檔案搬移失敗，請檢查檔案是否存在。" });
     }
 
     [HttpPost("batch-approve")]
@@ -193,7 +178,7 @@ public class HitlApiController : ControllerBase
     public async Task<IActionResult> BatchApprove([FromBody] HitlBatchDto dto)
     {
         if (!await PermissionHelper.HasPermissionAsync(_context, User, "HitlDashboard", "Update", _redis))
-        return StatusCode(403, new { message = "🚫 您的帳號權限不足。" });
+            return StatusCode(403, new { message = "🚫 您的帳號權限不足。" });
         
         var roleId = GetCurrentRoleId();
         if (roleId == 3) return Forbid();
@@ -214,10 +199,11 @@ public class HitlApiController : ControllerBase
 
         int successCount = 0;
         var affectedProfiles = new HashSet<string>();
+        string currentUser = User.Identity?.Name ?? "SystemAdmin";
 
         foreach (var log in logs)
         {
-            if (log.MediaAsset != null && await ProcessSingleApproveAsync(log, log.MediaAsset.SystemName, confirmedId))
+            if (log.MediaAsset != null && await ProcessSingleApproveAsync(log, log.MediaAsset.SystemName, confirmedId, currentUser))
             {
                 successCount++;
                 affectedProfiles.Add(log.MediaAsset.SystemName);
@@ -233,99 +219,60 @@ public class HitlApiController : ControllerBase
         return Ok(new { message = $"批次處理完成，共通過 {successCount} 筆資料" });
     }
 
-    // ----------------------------------------------------
-    // 內部輔助與授權邏輯
-    // ----------------------------------------------------
+    // ====================================================
+    // 內部輔助與授權邏輯 (🌟 結合共用服務的新版本)
+    // ====================================================
     private int GetCurrentRoleId()
     {
         var claim = User.FindFirst("RoleId")?.Value;
-        return int.TryParse(claim, out int id) ? id : 3; // 預設 3 (Guest)
+        return int.TryParse(claim, out int id) ? id : 3; 
     }
 
-    // 🌟 加入 newStatusId 參數，並移除 log.HitlConfirmed
-    private async Task<bool> ProcessSingleApproveAsync(AiAnalysisLog log, string systemName, int newStatusId)
-    {
-        if (await MoveObjectInS3Async(log, systemName, "pos", newStatusId, syncToOutput: true))
-        {
-            log.HitlReviewedAt = DateTime.Now;
-            return true;
-        }
-        return false;
-    }
-
-    // 🌟 加入 newStatusId 參數，並移除 log.HitlConfirmed
-    private async Task<bool> ProcessSingleRejectAsync(AiAnalysisLog log, string systemName, int newStatusId)
-    {
-        if (await MoveObjectInS3Async(log, systemName, "GARBAGE", newStatusId, syncToOutput: false))
-        {
-            log.HitlReviewedAt = DateTime.Now;
-            return true;
-        }
-        return false;
-    }
-
-    // 🌟 將 newStatus (string) 改成 newStatusId (int)
-    private async Task<bool> MoveObjectInS3Async(AiAnalysisLog log, string systemName, string targetFolder, int newStatusId, bool syncToOutput)
+    // 🌟 核准操作邏輯：包含 S3 搬移與資料庫模型賦值
+    private async Task<bool> ProcessSingleApproveAsync(AiAnalysisLog log, string systemName, int newStatusId, string currentUser)
     {
         try
         {
-            string sourceKey = log.MediaAsset.FilePath;
-            string fileName = sourceKey.Split('/').Last();
-            string targetKey = $"{systemName}/{targetFolder}/{fileName}";
+            // 呼叫共用服務，只有 S3 完美成功，才會回傳新的路徑並繼續往下走
+            string newPath = await _s3Service.MoveMediaWithThumbnailAsync(log.MediaAsset.FilePath, systemName, "pos", syncToOutput: true);
 
-            if (sourceKey == targetKey) return true;
-
-            await S3CopyAndRemove(sourceKey, targetKey);
-            if (syncToOutput)
-            {
-                await S3CopyOnly(targetKey, $"{systemName}/OUTPUT/{fileName}");
-            }
-
-            if (sourceKey.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase))
-            {
-                string thumbSrc = sourceKey.Replace(".mp4", ".jpg", StringComparison.OrdinalIgnoreCase);
-                string thumbDest = targetKey.Replace(".mp4", ".jpg", StringComparison.OrdinalIgnoreCase);
-
-                await S3CopyAndRemove(thumbSrc, thumbDest);
-                if (syncToOutput)
-                {
-                    string thumbFileName = thumbDest.Split('/').Last();
-                    await S3CopyOnly(thumbDest, $"{systemName}/OUTPUT/{thumbFileName}");
-                }
-            }
-
-            // 🌟 將狀態更新寫入 StatusId
-            log.MediaAsset.FilePath = targetKey;
+            // S3 成功後，才變更 Entity Framework 追蹤的屬性
+            log.MediaAsset.FilePath = newPath;
             log.StatusId = newStatusId;
+            log.HitlReviewedAt = DateTime.Now;
+            log.ReviewedBy = currentUser;
+            log.ConfidenceScore = 1.0f; 
 
             return true;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"❌ [S3 Move Error] 搬移失敗: {ex.Message}");
+            // 只要 S3 報錯（包含 404），立刻攔截並回傳 false，資料庫實體屬性保持原樣
+            Console.WriteLine($"❌ [S3 Move Error] 核准操作失敗，已阻斷資料庫更新: {ex.Message}");
             return false;
         }
     }
 
-    private async Task S3CopyAndRemove(string src, string dest)
+    // 🌟 拒絕操作邏輯：包含 S3 搬移與資料庫模型賦值
+    private async Task<bool> ProcessSingleRejectAsync(AiAnalysisLog log, string systemName, int newStatusId, string currentUser)
     {
         try
         {
-            var cpSrcArgs = new CopySourceObjectArgs().WithBucket(_bucketName).WithObject(src);
-            await _minioClient.CopyObjectAsync(new CopyObjectArgs().WithBucket(_bucketName).WithObject(dest).WithCopyObjectSource(cpSrcArgs));
-            await _minioClient.RemoveObjectAsync(new RemoveObjectArgs().WithBucket(_bucketName).WithObject(src));
-        }
-        catch { /* 忽略例外 */ }
-    }
+            string newPath = await _s3Service.MoveMediaWithThumbnailAsync(log.MediaAsset.FilePath, systemName, "GARBAGE", syncToOutput: false);
 
-    private async Task S3CopyOnly(string src, string dest)
-    {
-        try
-        {
-            var cpSrcArgs = new CopySourceObjectArgs().WithBucket(_bucketName).WithObject(src);
-            await _minioClient.CopyObjectAsync(new CopyObjectArgs().WithBucket(_bucketName).WithObject(dest).WithCopyObjectSource(cpSrcArgs));
+            log.MediaAsset.FilePath = newPath;
+            log.StatusId = newStatusId;
+            log.HitlReviewedAt = DateTime.Now;
+            log.ReviewedBy = currentUser;
+            log.ConfidenceScore = 0.0f; 
+
+            return true;
         }
-        catch { /* 忽略例外 */ }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"❌ [S3 Move Error] 拒絕操作失敗，已阻斷資料庫更新: {ex.Message}");
+            return false;
+        }
     }
 
     private async Task TriggerFeatureBankRebuild(string systemName)
@@ -346,6 +293,9 @@ public class HitlApiController : ControllerBase
     }
 }
 
+// ==========================================
+// DTO 模型
+// ==========================================
 public class HitlApproveDto
 {
     public long? Id { get; set; }

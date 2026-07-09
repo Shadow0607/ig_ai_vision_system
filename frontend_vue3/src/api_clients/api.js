@@ -68,8 +68,14 @@ export default {
     if (systemName) url += `&systemName=${systemName}`;
     return apiClient.get(url); 
   },
-  reclassifyMedia(payload) { return apiClient.put('/MediaAssets/reclassify', payload); },
-  batchReclassifyMedia(payload) { return apiClient.put('/MediaAssets/batch-reclassify', payload); },
+  reclassifyMedia(payload) { return apiClient.put('/MediaAssets/reclassify', payload, {
+      timeout: 60000 // 🌟 針對此重量級批次操作，將逾時放寬至 60 秒 (60000 毫秒)
+    }); },
+  batchReclassifyMedia(payload) { 
+    return apiClient.put('/MediaAssets/batch-reclassify', payload, {
+      timeout: 60000 // 🌟 針對此重量級批次操作，將逾時放寬至 60 秒 (60000 毫秒)
+    }); 
+  },
   getSystemRoutes() { return apiClient.get('/auth/routes'); },
   getRolePermissions(roleId) { return apiClient.get(`/auth/roles/${roleId}/permissions`); },
   updateRolePermissions(roleId, permissions) { return apiClient.put(`/auth/roles/${roleId}/permissions`, permissions); },

@@ -3,16 +3,16 @@ import shutil
 
 # ================= 配置設定 =================
 # 1. 來源專案根目錄
-src_dir = r"C:\Users\吳仲霖\Desktop\PythonScript\ig\ig_ai_vision_system"
+src_dir = r"C:\Users\吳仲霖\Desktop\PythonScript\DS-DAM"
 
 # 2. 輸出的目標資料夾 (所有 txt 都會丟到這裡)
-output_base_dir = r"C:\Users\吳仲霖\Desktop\Project_Files_Backup"
+output_base_dir = r"C:\Users\吳仲霖\Desktop\PythonScript\DS-DAM_backup"
 
 # 3. 要排除的資料夾
-exclude_dirs = {'bin', 'Properties', 'obj', '.vs', '.vscode', 'node_modules', '.git', '__pycache__'}
+exclude_dirs = {'bin', 'Properties', 'obj', '.vs', '.vscode', 'node_modules', '.git', '__pycache__','.venv_audiogen_linux','.venv_audiogen'}
 
 # 4. 包含的副檔名
-include_extensions = {'.cs', '.ts', '.py', '.vue', '.sql', '.json', '.txt', '.env', '.md','.js','.html','.css','.scss','.less','.xml','.yml','.yaml','.ini','.cfg','.config'}
+include_extensions = {'.cs', '.ts', '.py', '.vue', '.sql', '.json', '.txt', '.env', '.md','.js','.html','.css','.scss','.less','.xml','.yml','.ini','.cfg','.config','.cpp'}
 # ============================================
 
 def perform_flat_txt_backup():

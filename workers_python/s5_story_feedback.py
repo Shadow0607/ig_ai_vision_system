@@ -235,47 +235,55 @@ class S5StoryFeedbackManager:
             try:
                 videos = self.fetch_unprocessed_videos()
                 
-                # 🌟 新增：讓程式大聲告訴你它撈到了幾筆
+                if not videos:
+                    logger.info("💤 目前沒有待處理的影片，進入休眠...")
+                    time.sleep(10) # 測試用 10 秒
+                    continue
+                    
                 logger.info(f"🔍 掃描完畢，本次共撈取到 {len(videos)} 筆待檢測的影片。")
 
                 for asset in videos:
                     s3_key = asset['file_path'].replace(f"s3://{self.bucket_name}/", "")
                     
-                    # 雲原生無狀態處理：下載至暫存檔，處理完自動銷毀
-                    with tempfile.NamedTemporaryFile(suffix='.mp4', delete=True) as temp_vid:
-                        logger.info(f"正在分析影片: {asset['file_name']}")
-                        self.s3_client.download_file(self.bucket_name, s3_key, temp_vid.name)
-                        
-                        is_static, first_frame = self.is_static_fake_video(temp_vid.name)
-                        
-                        if is_static and first_frame is not None:
-                            logger.info(f"⚠️ 偵測到靜態假影片: {asset['file_name']}，啟動降級瘦身程序。")
-                            self.downgrade_and_requeue(asset, first_frame)
-                        else:
-                            # 🌟 新增：寫入資料庫，標記 s5_checked = TRUE
-                            conn = self.db_pool.get_connection()
-                            try:
-                                with conn.cursor() as cursor:
-                                    cursor.execute(
-                                        "UPDATE media_assets SET s5_checked = TRUE WHERE id = %s", 
-                                        (asset['id'],)
-                                    )
-                                    conn.commit()
-                            except Exception as e:
-                                logger.error(f"❌ 更新 s5_checked 失敗: {e}")
-                            finally:
-                                conn.close()
+                    # 🌟 加上單一任務的 try...except，避免單一檔案錯誤搞垮整個批次
+                    try:
+                        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=True) as temp_vid:
+                            logger.info(f"正在分析影片: {asset['file_name']}")
+                            self.s3_client.download_file(self.bucket_name, s3_key, temp_vid.name)
+                            
+                            is_static, first_frame = self.is_static_fake_video(temp_vid.name)
+                            
+                            if is_static and first_frame is not None:
+                                logger.info(f"⚠️ 偵測到靜態假影片: {asset['file_name']}，啟動降級瘦身程序。")
+                                self.downgrade_and_requeue(asset, first_frame)
+                            else:
+                                logger.info(f"✅ 確認為真實動態影片: {asset['file_name']}")
                                 
-                            logger.info(f"✅ 確認為真實動態影片，已標記免查: {asset['file_name']}")
+                    except Exception as item_error:
+                        # 攔截 S3 404 或是 OpenCV 讀取錯誤
+                        logger.error(f"❌ 處理影片 {asset['file_name']} 時發生錯誤，跳過此檔: {item_error}")
+                    
+                    finally:
+                        # 🌟 無論成功、失敗還是找不到檔案，都一定要標記為 s5_checked = TRUE，打破無限迴圈
+                        conn = self.db_pool.get_connection()
+                        try:
+                            with conn.cursor() as cursor:
+                                cursor.execute(
+                                    "UPDATE media_assets SET s5_checked = TRUE WHERE id = %s", 
+                                    (asset['id'],)
+                                )
+                                conn.commit()
+                        except Exception as db_e:
+                            logger.error(f"❌ 更新 s5_checked 失敗: {db_e}")
+                        finally:
+                            conn.close()
 
-                # 🌟 新增：讓你知道它要去睡覺了
                 logger.info("💤 本輪任務結束，進入休眠...")
-                
-                # 🌟 測試階段先改成睡 10 秒就好，確定沒問題再改回 60 * 15 (15分鐘)
                 time.sleep(10) 
             
             except Exception as e:
-                logger.error(f"S5 飛輪執行發生未預期錯誤: {e}")
+                # 只有資料庫連線中斷等「系統級錯誤」才會掉到這裡
+                logger.error(f"S5 飛輪執行發生系統級未預期錯誤: {e}")
                 time.sleep(60)
 
 if __name__ == "__main__":

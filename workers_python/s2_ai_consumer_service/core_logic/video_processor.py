@@ -44,26 +44,25 @@ class VideoProcessor:
 
     def process_long_video(self, media_id: int, system_name: str, s3_key: str, db_threshold: float, sample_rate_sec: float = 2.0):
         """
-        處理長影片核心邏輯：
-        下載暫存 -> 每 N 秒抽一幀 -> AI 辨識 -> 命中則獨立上傳截圖與寫入 DB -> 搬移原始影片 (不刪除)
+        處理長影片核心邏輯 (輕量檢查版)：
+        僅確認影片中是否有目標人物，不移動原始檔案。
         """
-        logger.info(f"🎬 [Video Processor] 開始處理長影片: {s3_key}")
+        logger.info(f"🎬 [Video Processor] 開始分析長影片內容: {s3_key}")
         
-        # 1. 建立本機暫存檔 (避免 2GB 影片塞爆記憶體)
+        # 1. 建立本機暫存檔 (供 OpenCV 分析使用)
         _, ext = os.path.splitext(s3_key)
         with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp_file:
             local_video_path = tmp_file.name
 
-        # 準備另一個變數用來存「可能轉碼過」的影片路徑，確保最後都能刪除乾淨
         safe_video_path = local_video_path
 
         try:
-            # 2. 從 S3 下載完整影片至本機暫存
+            # 2. 下載影片至暫存
             if not self.router.download_file(s3_key, local_video_path):
-                logger.error(f"❌ 影片下載至本機失敗: {s3_key}")
+                logger.error(f"❌ 影片下載失敗: {s3_key}")
                 return False
 
-            # 🌟 核心修正：加入轉碼防禦機制，避免 AV1 解碼失敗
+            # 🌟 AV1 防禦機制：確保 OpenCV 讀得到畫面
             safe_video_path = convert_to_h264_if_needed(local_video_path)
 
             cap = cv2.VideoCapture(safe_video_path)
@@ -74,114 +73,125 @@ class VideoProcessor:
             fps = cap.get(cv2.CAP_PROP_FPS)
             if fps <= 0: fps = 30
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            
-            # 設定抽幀間距 (例如：每 2 秒抽 1 幀，大幅節省算力)
             frame_interval = int(fps * sample_rate_sec)
             
             match_count = 0
             current_frame = 0
 
-            logger.info(f"🎞️ 影片資訊: 總幀數 {total_frames}, FPS {fps:.1f}, 預計每 {sample_rate_sec} 秒抽幀檢查")
+            logger.info(f"🎞️ 影片資訊: {total_frames} 幀, 每 {sample_rate_sec} 秒抽檢一次")
 
-            # 3. 迴圈抽幀與 AI 檢測
+            # 3. 抽幀辨識迴圈
             while current_frame < total_frames:
-                # 瞬間跳轉到指定影格 (效能極高)
                 cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
                 success, frame = cap.read()
-                if not success:
-                    break
+                if not success: break
 
-                # AI 提取人臉特徵
+                # AI 人臉萃取
                 target_embedding, face_detected = self.extractor.extract_target_embedding(frame)
                 
                 if face_detected and target_embedding:
-                    # 呼叫 Qdrant 決策引擎
-                    result, score, target_folder = DecisionEngine.compare_face_logic(
+                    # Qdrant 向量比對
+                    result, score, _ = DecisionEngine.compare_face_logic(
                         target_embedding, system_name, self.qdrant, db_threshold
                     )
 
-                    # 如果高度相似，則將該影格獨立裁切保存
+                    # 若命中，存出截圖並計數
                     if result == "MATCH_VSTACK":
                         match_count += 1
+                        # 依然保存截圖資產，作為該影片含有目標人物的證據
                         self._save_matched_frame(frame, system_name, s3_key, current_frame, fps, media_id, score)
 
                 current_frame += frame_interval
 
             cap.release()
-            logger.info(f"✅ 影片處理完畢！共為 {system_name} 萃取出 {match_count} 張目標臉部截圖。")
-
-            # 4. 原始影片處置 (保留原始檔案，僅搬移分類)
-            final_status = "OUTPUT" if match_count > 0 else "NOFACE"
+            
+            # ==========================================
+            # 🌟 4. 關鍵決策邏輯 (不移動檔案版)
+            # ==========================================
+            # 有命中 -> 標記 OUTPUT (本人)
+            # 沒命中 -> 標記 PENDING (待審核) 供人工二次確認
+            final_status = "OUTPUT" if match_count > 0 else "PENDING"
             final_score = 1.0 if match_count > 0 else 0.0
-            dest_folder = "pos" if match_count > 0 else "NOFACE"
 
-            new_video_key = self.router.move_file_safe(s3_key, dest_folder)
-            if new_video_key:
-                self.router.update_media_asset_path(media_id, new_video_key)
-                self.router.update_db_log(media_id, final_status, match_count > 0, final_score)
+            logger.info(f"🏁 分析結束: {system_name} 匹配數 {match_count}。結果: {final_status}")
+
+            # 🌟 只更新資料庫 Log 狀態，不更動 FilePath (檔案留在原處)
+            self.router.update_db_log(media_id, final_status, match_count > 0, final_score)
 
             return True
 
         except Exception as e:
-            logger.error(f"❌ 影片處理期間發生意外錯誤: {e}")
+            logger.error(f"❌ 長影片處理異常: {e}")
             return False
         finally:
-            # 5. 無論成功失敗，務必刪除本機暫存的 2GB 大檔，釋放磁碟空間
+            # 5. 清理本機暫存空間 (避免磁碟爆滿)
             if os.path.exists(local_video_path):
                 os.remove(local_video_path)
-            # 如果有產生轉碼後的 H.264 暫存檔，也要一併刪除
             if safe_video_path != local_video_path and os.path.exists(safe_video_path):
                 os.remove(safe_video_path)
 
     def _save_matched_frame(self, frame_img, system_name, original_s3_key, frame_idx, fps, parent_media_id, score):
-        """將符合條件的單一影格，獨立轉存為全新圖片並上傳 S3 與 DB"""
+        """完全動態化的證據截圖存檔"""
+        from utils.hash_helper import HashHelper
+        
+        # 1. 取得必要的動態 ID (拒絕寫死)
+        # 從 SysStatusManager 根據 Code 獲取真正對應的資料庫 ID
+        image_type_id = self.router.status_manager.get_id("MEDIA_TYPE", "IMAGE")
+        downloaded_id = self.router.status_manager.get_id("DOWNLOAD_STATUS", "DOWNLOADED")
+
         sec = int(frame_idx / fps)
         base_name = os.path.basename(original_s3_key).rsplit('.', 1)[0]
-        # 命名規則：原檔名_frame_秒數s_亂數.jpg
         new_filename = f"{base_name}_frame_{sec}s_{uuid.uuid4().hex[:6]}.jpg"
         target_key = f"{system_name}/pos/{new_filename}"
 
-        # 圖片編碼
         success, buffer = cv2.imencode(".jpg", frame_img)
         if not success: return
+        
+        img_bytes = buffer.tobytes()
+        p_hash, md5_hash = HashHelper.get_dual_fingerprints(img_bytes, new_filename)
+        # 🌟 整合數位指紋，確保截圖也能去重
 
         try:
-            # 1. 獨立上傳至 S3
+            # 2. 上傳至 S3
             self.router.s3_client.put_object(
                 Bucket=self.router.bucket_name,
                 Key=target_key,
-                Body=buffer.tobytes(),
+                Body=img_bytes,
                 ContentType='image/jpeg'
             )
             
-            # 2. 將這張截圖作為「全新的資產」寫入 MySQL 資料庫
+            # 3. 寫入資料庫 (完全繼承父系屬性與動態 ID)
             conn = self.router._get_connection()
-            with conn.cursor() as cursor:  # 🌟 移除了 dictionary=True
-                # 依序撈出 original_shortcode (索引 0) 與 original_username (索引 1)
-                cursor.execute("SELECT original_shortcode, original_username FROM media_assets WHERE id = %s", (parent_media_id,))
-                # 🌟 如果沒撈到資料，預設給一個含有兩個 None 的 Tuple
-                parent_info = cursor.fetchone() or (None, None) 
+            try:
+                with conn.cursor() as cursor:
+                    # 繼承父影片的關鍵資訊，包含 person_id 與 source_type_id
+                    cursor.execute("""
+                        SELECT original_shortcode, original_username, person_id, source_type_id 
+                        FROM media_assets WHERE id = %s
+                    """, (parent_media_id,))
+                    p_info = cursor.fetchone() or (None, None, None, None)
+                    
+                    sql = """
+                        INSERT INTO media_assets 
+                        (person_id, system_name, file_name, file_path, file_size_bytes, 
+                        media_type_id, source_type_id, download_status_id,
+                        original_shortcode, original_username, image_hash, file_hash) 
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """
+                    cursor.execute(sql, (
+                        p_info[2], system_name, new_filename, target_key, len(img_bytes), 
+                        image_type_id, p_info[3], downloaded_id, 
+                        p_info[0], p_info[1], p_hash, md5_hash # 🌟 填入雙指紋
+                    ))
+                    new_media_id = cursor.lastrowid
+                    conn.commit()
+                    
+                # 4. 更新 AI 判定日誌
+                self.router.update_db_log(new_media_id, "OUTPUT", True, score)
+                logger.info(f"📸 證據截圖動態存檔成功: {new_filename} (ID: {new_media_id})")
                 
-                sql = """
-                    INSERT INTO media_assets 
-                    (system_name, file_name, file_path, file_size_bytes, media_type, original_shortcode, original_username) 
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """
-                cursor.execute(sql, (
-                    system_name, new_filename, target_key, len(buffer.tobytes()), 
-                    'IMAGE', parent_info[0], parent_info[1] # 🌟 改用索引 [0] 和 [1] 取值
-                ))
-                new_media_id = cursor.lastrowid
-                conn.commit()
-                
-            # ... (下半部維持不變) ...
-            
-            # 3. 更新這張新截圖的 AI 判定日誌
-            self.router.update_db_log(new_media_id, "OUTPUT", True, score)
-            logger.info(f"📸 截圖擷取成功並上傳: {new_filename} (分數: {score:.2f})")
-            
-        except Exception as e:
-            logger.error(f"❌ 截圖獨立保存失敗: {e}")
-        finally:
-            if 'conn' in locals() and conn.open:
+            finally:
                 conn.close()
+                
+        except Exception as e:
+            logger.error(f"❌ 證據截圖存檔失敗: {e}")

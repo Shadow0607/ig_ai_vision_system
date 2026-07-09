@@ -221,7 +221,8 @@ builder.Services.AddAuthentication(options =>
 builder.Services.AddSignalR();
 builder.Services.AddHostedService<RedisMonitorService>();
 builder.Services.AddHostedService<OrphanFileSweeperService>();
-
+builder.Services.AddHostedService<BatchReclassifyWorkerService>();
+builder.Services.AddScoped<IS3MediaStorageService, S3MediaStorageService>();
 // ====================================================
 // 🌟 註冊 MinIO 服務 (改為直接讀取環境變數)
 // ====================================================

@@ -78,17 +78,31 @@ class DBRepository:
                     'is_monitored': row['is_monitored']    # 是否需掃描 [cite: 36]
                 }
         return data_map
+    # 在 DBRepository 類別中新增以下邏輯
+    def is_any_hash_exists(self, p_hash: str, md5_hash: str) -> bool:
+        """只要 pHash 或 MD5 其中一個在資料庫中已存在，即視為重複"""
+        if not p_hash and not md5_hash: return False
+        
+        query = "SELECT id FROM media_assets WHERE image_hash = %s OR file_hash = %s LIMIT 1"
+        conn = self.pool.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(query, (p_hash, md5_hash))
+                return cursor.fetchone() is not None
+        finally:
+            conn.close()
+
+    # 記得修改 insert_media_asset 以接收並存入 file_hash 欄位
 
     def insert_media_asset(self, asset_data: dict) -> int:
-        """寫入媒體資產紀錄 (包含 IG/YT 共通欄位) [cite: 15]"""
         query = """
             INSERT INTO media_assets (
                 person_id, system_name, file_name, file_path,
                 media_type_id, source_type_id, download_status_id,
-                original_username, original_shortcode, ig_media_id, source_is_verified
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                original_username, original_shortcode, ig_media_id, 
+                source_is_verified, image_hash, file_hash
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
-        # 自動推斷媒體類型 [cite: 49]
         file_name = asset_data.get("file_name", "")
         m_type = "VIDEO" if file_name.lower().endswith(".mp4") else "IMAGE"
         media_type_id = self.status_manager.get_id("MEDIA_TYPE", m_type)
@@ -102,9 +116,11 @@ class DBRepository:
             asset_data.get("source_type_id"),
             asset_data.get("download_status_id"),
             asset_data.get("original_username"),
-            asset_data.get("original_shortcode"), # 儲存 IG shortcode 或 YT Video ID [cite: 16]
+            asset_data.get("original_shortcode"),
             asset_data.get("ig_media_id"), 
-            asset_data.get("source_is_verified", 0)
+            asset_data.get("source_is_verified", 0),
+            asset_data.get("image_hash"), # 🌟 寫入 pHash
+            asset_data.get("file_hash")   # 🌟 寫入 MD5
         )
         return self._execute_query(query, values, fetch=False)
 

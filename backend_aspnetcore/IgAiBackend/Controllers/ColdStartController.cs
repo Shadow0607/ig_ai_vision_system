@@ -7,6 +7,7 @@ using System.Text.Json;
 using Minio;
 using Minio.DataModel.Args;
 using IgAiBackend.Helpers;
+using IgAiBackend.Services;
 namespace IgAiBackend.Controllers;
 
 [ApiController]
@@ -18,12 +19,14 @@ public class ColdStartController : ControllerBase
     private readonly IMinioClient _minioClient; // 🌟 注入 MinIO Client
     private readonly string _bucketName;
     private readonly string _minioEndpoint;
+    private readonly IS3MediaStorageService _s3Service;
 
     public ColdStartController(
         ApplicationDbContext context,
         IConnectionMultiplexer redis,
         IMinioClient minioClient,
-        IConfiguration config)
+        IConfiguration config,
+        IS3MediaStorageService s3Service)
     {
         _context = context;
         _redis = redis;
@@ -31,6 +34,7 @@ public class ColdStartController : ControllerBase
 
         _bucketName = config["Minio:BucketName"] ?? "ig-ai-assets";
         _minioEndpoint = config["Minio:Endpoint"] ?? "localhost:9000";
+        _s3Service = s3Service;
     }
 
     // ==========================================
@@ -39,7 +43,7 @@ public class ColdStartController : ControllerBase
     [HttpGet("pending")]
     public async Task<IActionResult> GetPendingReviews()
     {
-        if (!await PermissionHelper.HasPermissionAsync(_context, User, "ColdStartSetup", "View", _redis)) 
+        if (!await PermissionHelper.HasPermissionAsync(_context, User, "ColdStartSetup", "View", _redis))
             return StatusCode(403, new { message = "🚫 您沒有查看冷啟動數據的權限。" });
 
         // 🌟 修正：Include Status 並使用 Code 查詢
@@ -96,9 +100,9 @@ public class ColdStartController : ControllerBase
     [HttpPost("confirm")]
     public async Task<IActionResult> ConfirmSelection([FromBody] ColdStartConfirmDto dto)
     {
-        if (!await PermissionHelper.HasPermissionAsync(_context, User, "ColdStartSetup", "Update", _redis)) 
-            return StatusCode(403, new { message = "🚫 權限不足。" });;
-        
+        if (!await PermissionHelper.HasPermissionAsync(_context, User, "ColdStartSetup", "Update", _redis))
+            return StatusCode(403, new { message = "🚫 權限不足。" }); ;
+
         // 🌟 取得新狀態的 ID
         var outputId = await _context.SysStatuses.Where(s => s.Category == "AI_RECOGNITION" && s.Code == "OUTPUT").Select(s => s.Id).FirstOrDefaultAsync();
         var garbageId = await _context.SysStatuses.Where(s => s.Category == "AI_RECOGNITION" && s.Code == "GARBAGE").Select(s => s.Id).FirstOrDefaultAsync();
@@ -134,7 +138,7 @@ public class ColdStartController : ControllerBase
     [HttpPost("reject")]
     public async Task<IActionResult> RejectSelection([FromBody] ColdStartRejectDto dto)
     {
-        if (!await PermissionHelper.HasPermissionAsync(_context, User, "ColdStartSetup", "DELETE", _redis)) 
+        if (!await PermissionHelper.HasPermissionAsync(_context, User, "ColdStartSetup", "DELETE", _redis))
             return StatusCode(403, new { message = "🚫 權限不足。" });
 
         if (dto.RejectedMediaIds == null || !dto.RejectedMediaIds.Any())
@@ -184,39 +188,33 @@ public class ColdStartController : ControllerBase
     {
         try
         {
-            string sourceKey = log.MediaAsset.FilePath;
-            string fileName = sourceKey.Split('/').Last();
-            string targetKey = $"{systemName}/{targetFolder}/{fileName}";
+            // 🚀 呼叫共用服務，只有 S3 百分之百成功，才會拿到 newPath
+            string newPath = await _s3Service.MoveMediaWithThumbnailAsync(log.MediaAsset.FilePath, systemName, targetFolder, syncToOutput);
 
-            if (sourceKey != targetKey)
-            {
-                await S3CopyAndRemove(sourceKey, targetKey);
-                if (syncToOutput) await S3CopyOnly(targetKey, $"{systemName}/OUTPUT/{fileName}");
-                if (sourceKey.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase))
-                {
-                    string thumbSrc = sourceKey.Replace(".mp4", ".jpg", StringComparison.OrdinalIgnoreCase);
-                    string thumbDest = targetKey.Replace(".mp4", ".jpg", StringComparison.OrdinalIgnoreCase);
-                    await S3CopyAndRemove(thumbSrc, thumbDest);
-                    if (syncToOutput) await S3CopyOnly(thumbDest, $"{systemName}/OUTPUT/{thumbDest.Split('/').Last()}");
-                }
-            }
+            // 🌟 絕對防線：上面沒報錯，才會執行到這裡更新資料庫
             string currentUser = User.Identity?.Name ?? "System";
-            // 🌟 寫入新的路徑與狀態
-            log.MediaAsset.FilePath = targetKey;
-            log.StatusId = newStatusId; 
+            log.MediaAsset.FilePath = newPath;
+            log.StatusId = newStatusId;
 
-            // 🌟 視覺強迫症專屬：人工確認拉回直接滿分，排除則歸零
-            if (targetFolder == "pos" || targetFolder == "OUTPUT") {
+            if (targetFolder == "pos" || targetFolder == "OUTPUT")
+            {
                 log.ConfidenceScore = 1.0f;
                 log.ReviewedBy = currentUser;
-            } else if (targetFolder == "GARBAGE") {
+            }
+            else if (targetFolder == "GARBAGE")
+            {
                 log.ConfidenceScore = 0.0f;
                 log.ReviewedBy = currentUser;
             }
 
             return true;
         }
-        catch (Exception ex) { Console.WriteLine($"❌ [S3 Move] 失敗: {ex.Message}"); return false; }
+        catch (Exception ex)
+        {
+            // 🚫 只要 S3 報錯，直接攔截，保護 EF Core 不做任何資料庫更新
+            Console.WriteLine($"❌ [S3 Move] 失敗已阻斷資料庫更新: {ex.Message}");
+            return false;
+        }
     }
 
     // 輔助方法：S3 複製並刪除原檔 (Move)
@@ -272,7 +270,7 @@ public class ColdStartController : ControllerBase
             Console.WriteLine($"❌ [Redis Error] {ex.Message}");
         }
     }
-    
+
 
     // ==========================================
     // 5. [新增] 手動批量上傳正/負樣本
@@ -300,7 +298,7 @@ public class ColdStartController : ControllerBase
 
         string targetFolder = isPositive ? "pos" : "GARBAGE";
         // 🌟 根據正負樣本決定狀態 Code，正樣本為 SEED_PHOTO，負樣本為 GARBAGE
-        string targetStatusCode = isPositive ? "SEED_PHOTO" : "GARBAGE"; 
+        string targetStatusCode = isPositive ? "SEED_PHOTO" : "GARBAGE";
         var targetStatusId = await _context.SysStatuses.Where(s => s.Category == "AI_RECOGNITION" && s.Code == targetStatusCode).Select(s => s.Id).FirstOrDefaultAsync();
 
         int successCount = 0;
@@ -327,7 +325,7 @@ public class ColdStartController : ControllerBase
 
                 if (isPositive)
                 {
-                    using var stream2 = file.OpenReadStream(); 
+                    using var stream2 = file.OpenReadStream();
                     var putArgsOut = new PutObjectArgs()
                         .WithBucket(_bucketName)
                         .WithObject($"{systemName}/OUTPUT/{newFileName}")
@@ -349,14 +347,14 @@ public class ColdStartController : ControllerBase
                     CreatedAt = DateTime.UtcNow
                 };
                 _context.MediaAssets.Add(mediaAsset);
-                await _context.SaveChangesAsync(); 
+                await _context.SaveChangesAsync();
 
                 // 🌟 3. 改用 ID 寫入 AiAnalysisLog
                 var log = new AiAnalysisLog
                 {
                     MediaId = mediaAsset.Id,
-                    StatusId = targetStatusId, 
-                    ConfidenceScore = 1.0f, 
+                    StatusId = targetStatusId,
+                    ConfidenceScore = 1.0f,
                     ReviewedBy = User.Identity?.Name ?? "System", // 👈 可以順手補上這行
                     ProcessedAt = DateTime.UtcNow
                 };

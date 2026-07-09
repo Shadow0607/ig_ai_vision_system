@@ -19,7 +19,7 @@ from state_management.db_repository import DBRepository
 from state_management.checkpoint_tracker import CheckpointTracker
 from utils.media_ffmpeg import MemoryMediaProcessor 
 from workers_python.s2_ai_consumer_service.storage.file_router import FileAndDBRouter
-
+from utils.hash_helper import HashHelper
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [S1-Cloud] - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -51,8 +51,14 @@ class S1Producer:
             sys.exit(1)
 
     def _save_and_dispatch_memory(self, system_name: str, fn: str, main_bytes: bytes, ai_bytes: bytes, asset_data: dict, target_folder: str):
-        """核心資產分發：上傳 S3 並寫入 DB 與任務佇列"""
+        p_hash, md5_hash = HashHelper.get_dual_fingerprints(main_bytes, fn)
+        # 🌟 2. 查重門禁：若指紋已存在，直接捨棄不佔空間
+        if self.db.is_any_hash_exists(p_hash, md5_hash):
+            logger.info(f"⏭️  [雙指紋去重跳過] 檔案已存在，捨棄: {fn}")
+            return
+            
         s3_key_main = f"{system_name}/{target_folder}/{fn}"
+        
         try:
             # 1. 上傳主檔案 (圖片或影片)
             content_type = "video/mp4" if fn.endswith(".mp4") else "image/jpeg"
@@ -68,7 +74,13 @@ class S1Producer:
                 )
 
             # 3. 完善 asset 資訊並寫入 DB
-            asset_data.update({"file_name": fn, "file_path": s3_key_main, "system_name": system_name})
+            asset_data.update({
+                "file_name": fn, 
+                "file_path": s3_key_main, 
+                "system_name": system_name,
+                "image_hash": p_hash,   # pHash
+                "file_hash": md5_hash   # MD5
+            })
             media_id = self.db.insert_media_asset(asset_data)
             
             if media_id:
@@ -261,7 +273,7 @@ class S1Producer:
             time.sleep(900)
 
 if __name__ == "__main__":
-    #S1Producer().run()
-    producer = S1Producer()
+    S1Producer().run()
+    #producer = S1Producer()
     # 只跑 IG 平台，不跑 YouTube
-    producer.test_platform_only('yt')
+    #producer.test_platform_only('yt')

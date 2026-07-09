@@ -9,6 +9,7 @@ import instaloader
 import boto3
 from botocore.config import Config
 import requests
+
 workers_dir = str(Path(__file__).resolve().parent.parent)
 if workers_dir not in sys.path:
     sys.path.insert(0, workers_dir)
@@ -16,7 +17,7 @@ from shared.config_loader import setup_project_env
 ROOT_DIR = setup_project_env()
 
 from state_management.db_repository import DBRepository
-
+from utils.hash_helper import HashHelper
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [Manual-Worker] - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -86,7 +87,7 @@ class ManualDownloadWorker:
         query = "SELECT system_name FROM media_assets WHERE id = %s"
         conn = self.db_repo.pool.get_connection()
         try:
-            with conn.cursor() as cursor:
+            with conn.cursor(dictionary=True) as cursor: # 確保回傳字典
                 cursor.execute(query, (media_id,))
                 res = cursor.fetchone()
                 return res['system_name'] if res else "unknown"
@@ -97,7 +98,7 @@ class ManualDownloadWorker:
         logger.info(f"⬇️ 開始執行隨選下載 - MediaID: {media_id}, Shortcode: {shortcode}")
         
         try:
-            # 🌟 1. 取得該資產所屬的人物系統名稱
+            # 1. 取得該資產所屬的人物系統名稱
             system_name = self._get_system_name(media_id)
 
             # 2. 透過 Shortcode 取得 IG 實體資料
@@ -111,6 +112,14 @@ class ManualDownloadWorker:
             # 4. 下載主體並上傳至 S3
             main_url = post.video_url if post.is_video else post.url
             media_bytes = self._download_to_memory(main_url)
+            
+            # 🌟 核心修正：計算雙指紋並進行雙重去重檢驗
+            p_hash, md5_hash = HashHelper.get_dual_fingerprints(media_bytes, file_name)
+            if self.db_repo.is_any_hash_exists(p_hash, md5_hash):
+                logger.warning(f"⏭️  [隨選雙重去重] 內容已存在，取消流程 (MediaID: {media_id})")
+                self._update_db_status(media_id, None, 28) # 28: SKIPPED
+                return
+            
             self.s3_client.put_object(
                 Bucket=self.bucket_name,
                 Key=target_key,
@@ -118,9 +127,9 @@ class ManualDownloadWorker:
                 ContentType=content_type
             )
 
-            # 🌟 5. 核心修正：如果是影片，額外下載封面圖供 AI 辨識使用
+            # 5. 如果是影片，額外下載封面圖供 AI 辨識使用
             if post.is_video:
-                thumb_bytes = self._download_to_memory(post.url) # post.url 為影片封面圖
+                thumb_bytes = self._download_to_memory(post.url) 
                 thumb_name = f"repost_approved_{shortcode}.jpg"
                 thumb_key = f"{system_name}/official/{thumb_name}"
                 self.s3_client.put_object(
@@ -129,12 +138,18 @@ class ManualDownloadWorker:
                     Body=thumb_bytes,
                     ContentType="image/jpeg"
                 )
+                
             downloaded_id = self.db_repo.status_manager.get_id("DOWNLOAD_STATUS", "DOWNLOADED")
-            # 🌟 6. 更新 MySQL (直接存入 target_key，不再帶有 s3:// 前綴)
-            self._update_db_status(media_id, target_key, downloaded_id)
+            
+            # 🌟 6. 寫入雙指紋至資料庫
+            self._update_db_status(media_id, target_key, downloaded_id, p_hash, md5_hash)
             
             # 7. 推送給 S2 AI 引擎進行特徵分析
-            self.redis_client.lpush(self.target_ai_queue, json.dumps({"media_id": media_id}))
+            self.redis_client.lpush(self.target_ai_queue, json.dumps({
+                "media_id": media_id,
+                "system_name": system_name,
+                "file_path": target_key
+            }))
             logger.info(f"✅ 隨選下載完成，已交棒給 AI 引擎處理 (MediaID: {media_id})")
 
         except instaloader.exceptions.BadResponseException:
@@ -145,29 +160,30 @@ class ManualDownloadWorker:
             self._update_db_status(media_id, None, 27)
 
     def _download_to_memory(self, url: str) -> bytes:
-        """實作 Requests 下載邏輯，將網路串流直接載入 RAM"""
         response = requests.get(url, timeout=15)
         response.raise_for_status()
         return response.content
 
-    def _update_db_status(self, media_id: int, new_file_path: str, status_id: int):
-        """利用現有的 DBRepository 更新資料庫狀態與路徑"""
-        query = """
-            UPDATE media_assets 
-            SET download_status_id = %s, updated_at = NOW()
-            """
+    # 🌟 核心修正：動態組裝 UPDATE 語句，支援寫入 pHash 與 MD5
+    def _update_db_status(self, media_id: int, new_file_path: str, status_id: int, p_hash: str = None, md5_hash: str = None):
+        """利用現有的 DBRepository 更新資料庫狀態、路徑與指紋"""
+        query = "UPDATE media_assets SET download_status_id = %s, updated_at = NOW()"
         params = [status_id]
         
         if new_file_path:
-            query = """
-            UPDATE media_assets 
-            SET download_status_id = %s, file_path = %s 
-            WHERE id = %s
-            """
-            params.extend([new_file_path, media_id])
-        else:
-            query += " WHERE id = %s"
-            params.append(media_id)
+            query += ", file_path = %s"
+            params.append(new_file_path)
+            
+        if p_hash:
+            query += ", image_hash = %s"
+            params.append(p_hash)
+            
+        if md5_hash:
+            query += ", file_hash = %s"
+            params.append(md5_hash)
+
+        query += " WHERE id = %s"
+        params.append(media_id)
 
         conn = self.db_repo.pool.get_connection()
         try:
