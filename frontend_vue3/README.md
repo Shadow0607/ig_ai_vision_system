@@ -1,42 +1,33 @@
-# frontend_vue3
+# IG AI Vision System - Vue 3 Frontend
 
-This template should help get you started developing with Vue 3 in Vite.
+本子系統為系統的網頁控制面板 (Dashboard)，供管理員監控爬蟲進度、AI 辨識結果，以及進行人工介入審查 (Human-in-the-loop)。
 
-## Recommended IDE Setup
+## 技術棧
+- **框架**：Vue 3 (Composition API)
+- **建置工具**：Vite
+- **路由**：Vue Router
+- **HTTP 請求**：Axios
+- **即時通訊**：@microsoft/signalr
 
-[VS Code](https://code.visualstudio.com/) + [Vue (Official)](https://marketplace.visualstudio.com/items?itemName=Vue.volar) (and disable Vetur).
+## 核心功能
+1. **系統監控儀表板**：
+   - 即時顯示目前的爬蟲佇列與 AI 辨識佇列堆積數量。
+   - 透過 SignalR 即時接收後端 (.NET) 傳來的系統與 Worker 狀態。
+2. **人工審核介面**：
+   - 顯示被 AI 判定為 `PENDING` (待定) 或被隔離區 (`quarantine`) 攔截的影像。
+   - 提供按鈕允許操作員手動標示「是本人」或「不是本人」。
+3. **動態載入圖片**：
+   - 由於圖片存放於 MinIO (S3)，前端透過後端 API 或 MinIO 的公開網址安全地取回影像並展示。
 
-## Recommended Browser Setup
-
-- Chromium-based browsers (Chrome, Edge, Brave, etc.):
-  - [Vue.js devtools](https://chromewebstore.google.com/detail/vuejs-devtools/nhdogjmejiglipccpnnnanhbledajbpd)
-  - [Turn on Custom Object Formatter in Chrome DevTools](http://bit.ly/object-formatters)
-- Firefox:
-  - [Vue.js devtools](https://addons.mozilla.org/en-US/firefox/addon/vue-js-devtools/)
-  - [Turn on Custom Object Formatter in Firefox DevTools](https://fxdx.dev/firefox-devtools-custom-object-formatters/)
-
-## Type Support for `.vue` Imports in TS
-
-TypeScript cannot handle type information for `.vue` imports by default, so we replace the `tsc` CLI with `vue-tsc` for type checking. In editors, we need [Volar](https://marketplace.visualstudio.com/items?itemName=Vue.volar) to make the TypeScript language service aware of `.vue` types.
-
-## Customize configuration
-
-See [Vite Configuration Reference](https://vite.dev/config/).
-
-## Project Setup
-
-```sh
+## 啟動方式
+開發環境啟動：
+```bash
 npm install
-```
-
-### Compile and Hot-Reload for Development
-
-```sh
 npm run dev
 ```
+啟動後預設會運行在 `http://localhost:5173`。
 
-### Type-Check, Compile and Minify for Production
-
-```sh
+編譯發布：
+```bash
 npm run build
 ```
